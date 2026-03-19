@@ -1,0 +1,69 @@
+﻿<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>DXFs 3D</title>
+  <link rel="stylesheet" href="./styles.css" />
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="topbar">
+    <div class="left">
+      <label class="btn">
+        Importar DXF(s)
+        <input id="fileInput" type="file" accept=".dxf,.DXF" multiple hidden />
+      </label>
+      <label class="btn">
+        Importar STEP(s)
+        <input id="stepInput" type="file" accept=".step,.stp,.STEP,.STP" multiple hidden />
+      </label>
+
+      <button id="fitBtn" class="btn secondary">Enquadrar (Fit)</button>
+      <button id="clearBtn" class="btn danger">Limpar</button>
+      <span id="pieceCount" class="counter">Pecas: 0</span>
+      <span id="batchTime" class="counter">Tempo: 0 ms</span>
+      <span id="runtimeMode" class="counter">Render: GPU (WebGL)</span>
+      <span id="selectedPiece" class="counter">Peca sel.: -</span>
+    </div>
+
+    <div class="right">
+      <label class="row">
+        Escala da cena
+        <input id="sceneScale" type="number" value="1" min="0.1" max="20" step="0.1" />
+      </label>
+
+      <label class="row">
+        Zoom da camera
+        <input id="cameraZoom" type="number" value="1" min="0.2" max="10" step="0.1" />
+      </label>
+
+      <label class="row">
+        Espessura (Z)
+        <input id="thickness" type="number" value="5" min="0.1" step="0.1" />
+      </label>
+
+      <label class="row">
+        Centro automatico
+        <input id="autoCenter" type="checkbox" checked />
+      </label>
+    </div>
+  </div>
+
+  <div id="viewport"></div>
+
+  <div id="help">
+    Mouse: <b>Esq</b> orbitar | <b>Meio</b> zoom | <b>Dir</b> pan
+  </div>
+
+  <script type="module" src="./app.js?v=gpu-only-1"></script>
+</body>
+</html>
