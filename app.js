@@ -61,6 +61,9 @@ scene.add(sheetsGroup);
 const partsGroup = new THREE.Group();
 scene.add(partsGroup);
 
+const inactiveInstancedProxyGroup = new THREE.Group();
+scene.add(inactiveInstancedProxyGroup);
+
 const bboxAll = new THREE.Box3();
 const tempBox = new THREE.Box3();
 const tempVec = new THREE.Vector3();
@@ -104,6 +107,10 @@ const DXF_MESH_CACHE_MAX_BYTES = 280 * 1024 * 1024;
 const STEP_MESH_CACHE_PIPELINE_VERSION = "step-mesh-v1";
 const DXF_PARSE_TIMEOUT_MS = 90000;
 const STEP_PARSE_TIMEOUT_MS = 60000;
+const ENABLE_INACTIVE_PROXY_INSTANCING = true;
+const INACTIVE_PROXY_MIN_SIZE = 1;
+const INACTIVE_PROXY_MIN_THICKNESS = 0.9;
+const INACTIVE_PROXY_FPS_SAFE_CAP = 1 << 18;
 const DXF_CACHE_STORE_NAME = DXF_PARSE_CACHE_STORE_NAME;
 const DXF_CACHE_PIPELINE_VERSION = DXF_PARSE_CACHE_PIPELINE_VERSION;
 const DXF_CACHE_MAX_ENTRIES = DXF_PARSE_CACHE_MAX_ENTRIES;
@@ -124,6 +131,8 @@ const INVENTORY_RENDER_CHUNK = 80;
 const INVENTORY_SCROLL_PREFETCH_PX = 280;
 let inventoryRenderList = [];
 let inventoryRenderLimit = 0;
+let inactiveProxyMesh = null;
+let inactiveProxyDirty = true;
 
 function createDxfWorkerPool(workerCount) {
   if (typeof Worker === "undefined") return null;
@@ -801,6 +810,7 @@ function cachePartBounds(part) {
     : new THREE.Box3();
   cached.setFromObject(part);
   part.userData.layoutBounds = cached;
+  inactiveProxyDirty = true;
   return cached;
 }
 
@@ -844,6 +854,252 @@ function setSheetCreationTemplate(config) {
 function createSheetFrom(config = null) {
   const source = config || getSheetCreationTemplate();
   return cloneSheetConfig(source);
+}
+
+function shouldUseInactiveProxyInstancing() {
+  return ENABLE_INACTIVE_PROXY_INSTANCING && !!renderer.capabilities?.isWebGL2;
+}
+
+function buildInactiveProxyShaderMaterial() {
+  return new THREE.RawShaderMaterial({
+    glslVersion: THREE.GLSL3,
+    transparent: true,
+    depthTest: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    uniforms: {
+      uOpacity: { value: 0.86 }
+    },
+    vertexShader: `#version 300 es
+      precision highp float;
+      in vec3 position;
+      in vec3 normal;
+      in vec3 iOffset;
+      in vec3 iScale;
+      in vec3 iRotation;
+      in vec3 iColor;
+
+      uniform mat4 modelViewMatrix;
+      uniform mat4 projectionMatrix;
+
+      out vec3 vColor;
+      out float vLight;
+
+      mat3 rotX(float a) {
+        float c = cos(a);
+        float s = sin(a);
+        return mat3(
+          1.0, 0.0, 0.0,
+          0.0, c, -s,
+          0.0, s, c
+        );
+      }
+
+      mat3 rotY(float a) {
+        float c = cos(a);
+        float s = sin(a);
+        return mat3(
+          c, 0.0, s,
+          0.0, 1.0, 0.0,
+          -s, 0.0, c
+        );
+      }
+
+      mat3 rotZ(float a) {
+        float c = cos(a);
+        float s = sin(a);
+        return mat3(
+          c, -s, 0.0,
+          s, c, 0.0,
+          0.0, 0.0, 1.0
+        );
+      }
+
+      void main() {
+        mat3 rot = rotZ(iRotation.z) * rotY(iRotation.y) * rotX(iRotation.x);
+        vec3 local = rot * (position * iScale);
+        vec3 world = iOffset + local;
+        vec3 lightDir = normalize(vec3(0.48, 0.92, 0.61));
+        vec3 nrm = normalize(rot * normal);
+        vLight = max(dot(nrm, lightDir), 0.24);
+        vColor = iColor;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(world, 1.0);
+      }
+    `,
+    fragmentShader: `#version 300 es
+      precision highp float;
+      in vec3 vColor;
+      in float vLight;
+      uniform float uOpacity;
+      out vec4 outColor;
+
+      void main() {
+        outColor = vec4(vColor * vLight, uOpacity);
+      }
+    `
+  });
+}
+
+function createInactiveProxyInstancedMesh(capacity = 1) {
+  const instanceCapacity = Math.max(1, Math.trunc(capacity || 1));
+  const geometry = new THREE.InstancedBufferGeometry();
+  const boxGeometry = new THREE.BoxGeometry(1, 1, 1).toNonIndexed();
+  const boxPositions = boxGeometry.getAttribute("position");
+  const boxNormals = boxGeometry.getAttribute("normal");
+  geometry.setAttribute("position", boxPositions.clone());
+  geometry.setAttribute("normal", boxNormals.clone());
+  boxGeometry.dispose();
+
+  const iOffset = new THREE.InstancedBufferAttribute(new Float32Array(instanceCapacity * 3), 3);
+  const iScale = new THREE.InstancedBufferAttribute(new Float32Array(instanceCapacity * 3), 3);
+  const iRotation = new THREE.InstancedBufferAttribute(new Float32Array(instanceCapacity * 3), 3);
+  const iColor = new THREE.InstancedBufferAttribute(new Float32Array(instanceCapacity * 3), 3);
+  iOffset.setUsage(THREE.DynamicDrawUsage);
+  iScale.setUsage(THREE.DynamicDrawUsage);
+  iRotation.setUsage(THREE.DynamicDrawUsage);
+  iColor.setUsage(THREE.DynamicDrawUsage);
+  geometry.setAttribute("iOffset", iOffset);
+  geometry.setAttribute("iScale", iScale);
+  geometry.setAttribute("iRotation", iRotation);
+  geometry.setAttribute("iColor", iColor);
+  geometry.instanceCount = 0;
+  geometry.userData.instanceCapacity = instanceCapacity;
+
+  const material = buildInactiveProxyShaderMaterial();
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.name = "__inactiveProxyInstancedMesh";
+  mesh.frustumCulled = false;
+  mesh.matrixAutoUpdate = false;
+  mesh.updateMatrix();
+  mesh.visible = false;
+  inactiveInstancedProxyGroup.add(mesh);
+  return mesh;
+}
+
+function disposeInactiveProxyInstancedMesh() {
+  if (!inactiveProxyMesh) return;
+  if (inactiveProxyMesh.parent) inactiveProxyMesh.parent.remove(inactiveProxyMesh);
+  if (inactiveProxyMesh.geometry) inactiveProxyMesh.geometry.dispose();
+  if (inactiveProxyMesh.material) inactiveProxyMesh.material.dispose();
+  inactiveProxyMesh = null;
+}
+
+function getInactiveProxyCapacityTarget(requiredCount) {
+  const required = Math.max(1, Math.trunc(requiredCount || 1));
+  const pow = Math.ceil(Math.log2(required));
+  const sized = 2 ** Math.max(0, pow);
+  if (sized > INACTIVE_PROXY_FPS_SAFE_CAP) return required;
+  return sized;
+}
+
+function ensureInactiveProxyInstancedMesh(requiredCount) {
+  const required = Math.max(1, Math.trunc(requiredCount || 1));
+  if (!inactiveProxyMesh) {
+    inactiveProxyMesh = createInactiveProxyInstancedMesh(getInactiveProxyCapacityTarget(required));
+    return inactiveProxyMesh;
+  }
+
+  const capacity = Number(inactiveProxyMesh.geometry?.userData?.instanceCapacity || 0);
+  if (capacity >= required) return inactiveProxyMesh;
+
+  const nextCapacity = getInactiveProxyCapacityTarget(required);
+  disposeInactiveProxyInstancedMesh();
+  inactiveProxyMesh = createInactiveProxyInstancedMesh(nextCapacity);
+  return inactiveProxyMesh;
+}
+
+function resolveInactiveProxyColor(part, colorOut = new THREE.Color()) {
+  const cached = part?.userData?.inactiveProxyColor;
+  if (Array.isArray(cached) && cached.length === 3) {
+    colorOut.setRGB(
+      Number(cached[0] || 0),
+      Number(cached[1] || 0),
+      Number(cached[2] || 0)
+    );
+    return colorOut;
+  }
+
+  const sourceType = String(part?.userData?.sourceType || "dxf").toLowerCase();
+  if (sourceType === "step") colorOut.setHex(0x60a5fa);
+  else colorOut.setHex(0x34d399);
+  colorOut.offsetHSL(0, 0.02, -0.08);
+  part.userData.inactiveProxyColor = [colorOut.r, colorOut.g, colorOut.b];
+  return colorOut;
+}
+
+function syncInactiveProxyInstancing({ force = false, transitionActive = false } = {}) {
+  if (!shouldUseInactiveProxyInstancing()) {
+    disposeInactiveProxyInstancedMesh();
+    for (const part of partsGroup.children) part.visible = true;
+    inactiveProxyDirty = false;
+    return;
+  }
+
+  if (transitionActive) {
+    if (inactiveProxyMesh) inactiveProxyMesh.visible = false;
+    for (const part of partsGroup.children) part.visible = true;
+    inactiveProxyDirty = true;
+    return;
+  }
+
+  if (!force && !inactiveProxyDirty) return;
+
+  const proxiedParts = [];
+  for (const part of partsGroup.children) {
+    if (!part?.isObject3D) continue;
+    const sheetIndex = getValidSheetIndex(part.userData?.sheetIndex);
+    const keepMesh = part === selectedPart || sheetIndex < 0 || sheetIndex === activeSheetIndex;
+    part.visible = keepMesh;
+    if (!keepMesh) proxiedParts.push(part);
+  }
+
+  if (proxiedParts.length === 0) {
+    if (inactiveProxyMesh) {
+      inactiveProxyMesh.geometry.instanceCount = 0;
+      inactiveProxyMesh.visible = false;
+    }
+    inactiveProxyDirty = false;
+    return;
+  }
+
+  const mesh = ensureInactiveProxyInstancedMesh(proxiedParts.length);
+  const geometry = mesh.geometry;
+  const offsetAttr = geometry.getAttribute("iOffset");
+  const scaleAttr = geometry.getAttribute("iScale");
+  const rotationAttr = geometry.getAttribute("iRotation");
+  const colorAttr = geometry.getAttribute("iColor");
+  const tempColor = new THREE.Color();
+
+  let count = 0;
+  for (const part of proxiedParts) {
+    const bounds = getCachedPartBounds(part);
+    if (!(bounds instanceof THREE.Box3) || bounds.isEmpty()) {
+      part.visible = true;
+      continue;
+    }
+
+    const sizeX = Math.max(INACTIVE_PROXY_MIN_SIZE, Number(bounds.max.x) - Number(bounds.min.x));
+    const sizeY = Math.max(INACTIVE_PROXY_MIN_SIZE, Number(bounds.max.y) - Number(bounds.min.y));
+    const sizeZ = Math.max(INACTIVE_PROXY_MIN_THICKNESS, Number(bounds.max.z) - Number(bounds.min.z));
+    const centerX = (Number(bounds.min.x) + Number(bounds.max.x)) * 0.5;
+    const centerY = (Number(bounds.min.y) + Number(bounds.max.y)) * 0.5;
+    const centerZ = (Number(bounds.min.z) + Number(bounds.max.z)) * 0.5;
+
+    offsetAttr.setXYZ(count, centerX, centerY, centerZ);
+    scaleAttr.setXYZ(count, sizeX, sizeY, sizeZ);
+    rotationAttr.setXYZ(count, 0, 0, Number(part.rotation?.z || 0));
+    const color = resolveInactiveProxyColor(part, tempColor);
+    colorAttr.setXYZ(count, color.r, color.g, color.b);
+    count += 1;
+  }
+
+  geometry.instanceCount = count;
+  mesh.visible = count > 0;
+  offsetAttr.needsUpdate = true;
+  scaleAttr.needsUpdate = true;
+  rotationAttr.needsUpdate = true;
+  colorAttr.needsUpdate = true;
+  inactiveProxyDirty = false;
 }
 
 function occupiedBoxesForSheet(sheetIndex, exceptPart = null) {
@@ -956,6 +1212,7 @@ function shiftPartBoundsCache(part, dx, dy, dz) {
   cached.max.y += dy;
   cached.min.z += dz;
   cached.max.z += dz;
+  inactiveProxyDirty = true;
   return true;
 }
 
@@ -1335,6 +1592,7 @@ function setActiveSheet(index, { animate = false } = {}) {
   const idx = getValidSheetIndex(index);
   if (idx < 0) return;
   activeSheetIndex = idx;
+  inactiveProxyDirty = true;
   if (animate) {
     startSheetRingTransition();
     updateSheetListUi();
@@ -1393,6 +1651,7 @@ function removePartFromScene(part) {
   if (selectedPart === part) clearSelection();
   partsGroup.remove(part);
   disposeObject3D(part);
+  inactiveProxyDirty = true;
   return true;
 }
 
@@ -1422,6 +1681,7 @@ function deleteSheetAt(index) {
   }
 
   sheetState.splice(idx, 1);
+  inactiveProxyDirty = true;
 
   if (sheetState.length > 0) {
     activeSheetIndex = Math.min(idx, sheetState.length - 1);
@@ -1463,6 +1723,7 @@ function clearSelection() {
   }
 
   selectedPart = null;
+  inactiveProxyDirty = true;
   updateSelectedPieceBadge(null);
   updateSheetInfoBadge();
 }
@@ -1536,6 +1797,7 @@ function setSelectedPart(part) {
 
   selectionOutline = buildSelectionOutline(selectedPart);
   if (selectionOutline) selectedPart.add(selectionOutline);
+  inactiveProxyDirty = true;
 }
 
 function partFromIntersectionObject(object) {
@@ -5454,6 +5716,8 @@ clearBtn.addEventListener("click", () => {
   inventoryItems.length = 0;
   inventoryPreviewCache.clear();
   inventoryPreviewPending.clear();
+  disposeInactiveProxyInstancedMesh();
+  inactiveProxyDirty = false;
   updateGlobalBounds();
   updatePieceCountBadge();
   updateSheetListUi();
@@ -5463,6 +5727,7 @@ clearBtn.addEventListener("click", () => {
 
 window.addEventListener("beforeunload", () => {
   disposeAllInventoryTemplateGroups();
+  disposeInactiveProxyInstancedMesh();
   if (dxfWorkerPool && typeof dxfWorkerPool.terminate === "function") {
     dxfWorkerPool.terminate();
   }
@@ -5494,7 +5759,8 @@ function animate() {
       cameraDistance: camera.position.distanceTo(controls.target)
     });
   }
-  updateSheetRingTransition(performance.now());
+  const transitionActive = updateSheetRingTransition(now);
+  syncInactiveProxyInstancing({ transitionActive });
   controls.update();
   renderer.render(scene, camera);
 }
