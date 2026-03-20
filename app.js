@@ -1512,7 +1512,7 @@ function setSelectedPart(part) {
 
   selectedPart = part;
   transformControls.attach(selectedPart);
-  updateSelectedPieceBadge(selectedPart.name || "");
+  updateSelectedPieceBadge(selectedPart);
   const partSheetIndex = getValidSheetIndex(selectedPart.userData?.sheetIndex);
   if (partSheetIndex >= 0 && partSheetIndex !== activeSheetIndex) {
     setActiveSheet(partSheetIndex, { animate: true });
@@ -4150,17 +4150,18 @@ function updateCacheStatsBadge(stats = null) {
     (errors > 0 ? ` ERR:${errors}` : "");
 }
 
-function formatPieceLabel(name) {
-  const raw = String(name || "").trim();
-  if (!raw) return "-";
-  const base = raw.replace(/\.(dxf|step|stp)$/i, "");
-  const match = base.match(/\d+/);
-  return match ? match[0] : base;
+function getSelectedPartCode(part) {
+  const rawName = String(part?.name || "").trim();
+  if (!rawName) return "-";
+  const fileName = rawName.split(/[\\/]/).pop() || rawName;
+  const code = fileName.replace(/\.(dxf|step|stp)$/i, "").trim();
+  return code || "-";
 }
 
-function updateSelectedPieceBadge(name) {
+function updateSelectedPieceBadge(part) {
   if (!selectedPieceEl) return;
-  selectedPieceEl.textContent = `Peca sel.: ${formatPieceLabel(name)}`;
+  const displayCode = getSelectedPartCode(part);
+  selectedPieceEl.textContent = `Peca sel.: ${displayCode}`;
 }
 
 function updateSheetInfoBadge() {
