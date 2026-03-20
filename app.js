@@ -120,6 +120,7 @@ let dxfCacheDbPromise = null;
 let dxfCacheInitLogged = false;
 const inventoryItems = [];
 let inventoryNextId = 1;
+let inventoryColorCursor = 0;
 let inventoryFilterQuery = "";
 let inventoryFilterType = "all";
 let inventoryBusy = false;
@@ -4490,6 +4491,117 @@ function buildInventoryMergeKey(type, code) {
   return `${String(type || "").toLowerCase()}::${String(code || "").trim().toLowerCase()}`;
 }
 
+function hashStringFast(text) {
+  const value = String(text || "");
+  let hash = 2166136261;
+  for (let idx = 0; idx < value.length; idx += 1) {
+    hash ^= value.charCodeAt(idx);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function hueDistanceDegrees(a, b) {
+  const h1 = Number(a);
+  const h2 = Number(b);
+  if (!Number.isFinite(h1) || !Number.isFinite(h2)) return 180;
+  const delta = Math.abs(h1 - h2) % 360;
+  return delta > 180 ? 360 - delta : delta;
+}
+
+function clampNumber(value, min, max) {
+  return Math.max(min, Math.min(max, Number(value)));
+}
+
+function buildFallbackPreviewColor(seedText) {
+  const hash = hashStringFast(seedText);
+  const hue = (hash * 131 + (hash >>> 17)) % 360;
+  const saturation = 72 + ((hash >>> 9) % 22);
+  const lightness = 52 + ((hash >>> 21) % 12);
+  const accentHue = (hue + 22 + ((hash >>> 26) % 36)) % 360;
+  const accentSat = clampNumber(saturation - 10, 58, 95);
+  const accentLight = clampNumber(lightness - 12, 34, 68);
+  return {
+    h: hue,
+    s: saturation,
+    l: lightness,
+    ah: accentHue,
+    as: accentSat,
+    al: accentLight
+  };
+}
+
+function buildInventoryPreviewColorProfile(mergeKey) {
+  const seed = String(mergeKey || "");
+  const hash = hashStringFast(seed);
+  const goldenAngle = 137.50776405003785;
+  let hue = ((hash % 360) + (inventoryColorCursor * goldenAngle)) % 360;
+  const minGap = 32;
+  const hueStep = 41 + ((hash >>> 7) % 47);
+
+  const lookBack = Math.min(24, inventoryItems.length);
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    let hasConflict = false;
+    for (let idx = inventoryItems.length - lookBack; idx < inventoryItems.length; idx += 1) {
+      if (idx < 0) continue;
+      const prevHue = Number(inventoryItems[idx]?.previewColor?.h);
+      if (!Number.isFinite(prevHue)) continue;
+      if (hueDistanceDegrees(hue, prevHue) < minGap) {
+        hasConflict = true;
+        break;
+      }
+    }
+    if (!hasConflict) break;
+    hue = (hue + hueStep) % 360;
+  }
+
+  const saturation = 74 + ((hash >>> 11) % 20);
+  const lightness = 52 + ((hash >>> 19) % 12);
+  const accentHue = (hue + 20 + ((hash >>> 27) % 40)) % 360;
+  const accentSat = clampNumber(saturation - 8, 58, 96);
+  const accentLight = clampNumber(lightness - 14, 34, 68);
+  inventoryColorCursor += 1;
+  return {
+    h: Number(hue.toFixed(3)),
+    s: saturation,
+    l: lightness,
+    ah: Number(accentHue.toFixed(3)),
+    as: accentSat,
+    al: accentLight
+  };
+}
+
+function computeInventoryPreviewPalette(item) {
+  const seed = String(item?.mergeKey || item?.code || item?.fileName || "");
+  const profileRaw = item?.previewColor;
+  const profile = (
+    profileRaw &&
+    Number.isFinite(profileRaw.h) &&
+    Number.isFinite(profileRaw.s) &&
+    Number.isFinite(profileRaw.l)
+  )
+    ? profileRaw
+    : buildFallbackPreviewColor(seed);
+
+  const hue = clampNumber(profile.h, 0, 359.999);
+  const saturation = clampNumber(profile.s, 58, 96);
+  const lightness = clampNumber(profile.l, 40, 74);
+  const secondaryHue = Number.isFinite(profile.ah)
+    ? clampNumber(profile.ah, 0, 359.999)
+    : (hue + 24) % 360;
+  const secondarySat = Number.isFinite(profile.as)
+    ? clampNumber(profile.as, 52, 96)
+    : clampNumber(saturation - 8, 52, 96);
+  const secondaryLight = Number.isFinite(profile.al)
+    ? clampNumber(profile.al, 28, 68)
+    : clampNumber(lightness - 12, 28, 68);
+  return {
+    primary: `hsl(${hue.toFixed(2)} ${saturation.toFixed(1)}% ${lightness.toFixed(1)}%)`,
+    secondary: `hsla(${secondaryHue.toFixed(2)} ${secondarySat.toFixed(1)}% ${secondaryLight.toFixed(1)}%, 0.72)`,
+    frame: `hsla(${hue.toFixed(2)} ${Math.min(94, saturation + 6).toFixed(1)}% ${Math.min(78, lightness + 8).toFixed(1)}%, 0.14)`
+  };
+}
+
 function createInventoryPreviewCanvas(width = 168, height = 96) {
   const canvas = document.createElement("canvas");
   canvas.width = width;
@@ -4497,10 +4609,11 @@ function createInventoryPreviewCanvas(width = 168, height = 96) {
   return canvas;
 }
 
-function drawInventoryFallbackPreview(ctx, item, canvasWidth, canvasHeight) {
+function drawInventoryFallbackPreview(ctx, item, canvasWidth, canvasHeight, palette = null) {
+  const colors = palette || computeInventoryPreviewPalette(item);
   const w = Math.max(1, Number(item?.width || 1));
   const h = Math.max(1, Number(item?.height || 1));
-  const pad = 12;
+  const pad = 8;
   const availW = Math.max(1, canvasWidth - pad * 2);
   const availH = Math.max(1, canvasHeight - pad * 2);
   const scale = Math.min(availW / w, availH / h);
@@ -4509,10 +4622,10 @@ function drawInventoryFallbackPreview(ctx, item, canvasWidth, canvasHeight) {
   const ox = (canvasWidth - rw) * 0.5;
   const oy = (canvasHeight - rh) * 0.5;
 
-  ctx.strokeStyle = "rgba(56, 189, 248, 0.9)";
+  ctx.strokeStyle = colors.primary;
   ctx.lineWidth = 1.5;
   ctx.strokeRect(ox, oy, rw, rh);
-  ctx.strokeStyle = "rgba(34, 197, 94, 0.55)";
+  ctx.strokeStyle = colors.secondary;
   ctx.beginPath();
   ctx.moveTo(ox, oy);
   ctx.lineTo(ox + rw, oy + rh);
@@ -4521,7 +4634,8 @@ function drawInventoryFallbackPreview(ctx, item, canvasWidth, canvasHeight) {
   ctx.stroke();
 }
 
-function drawDxfContourPreview(ctx, item, canvasWidth, canvasHeight) {
+function drawDxfContourPreview(ctx, item, canvasWidth, canvasHeight, palette = null) {
+  const colors = palette || computeInventoryPreviewPalette(item);
   const contoursRaw = Array.isArray(item?.preParsed?.contours) ? item.preParsed.contours : [];
   if (contoursRaw.length === 0) return false;
 
@@ -4553,14 +4667,14 @@ function drawDxfContourPreview(ctx, item, canvasWidth, canvasHeight) {
   if (contours.length === 0) return false;
   const sourceW = Math.max(EPS, maxX - minX);
   const sourceH = Math.max(EPS, maxY - minY);
-  const pad = 8;
+  const pad = 4;
   const availW = Math.max(1, canvasWidth - pad * 2);
   const availH = Math.max(1, canvasHeight - pad * 2);
   const scale = Math.min(availW / sourceW, availH / sourceH);
   const offsetX = pad + (availW - sourceW * scale) * 0.5 - minX * scale;
   const offsetY = pad + (availH - sourceH * scale) * 0.5 + maxY * scale;
 
-  ctx.strokeStyle = "rgba(34, 197, 94, 0.92)";
+  ctx.strokeStyle = colors.primary;
   ctx.lineWidth = 1.2;
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
@@ -4588,18 +4702,20 @@ function buildInventoryPreviewDataUrl(item) {
   if (!ctx) return "";
   const width = canvas.width;
   const height = canvas.height;
+  const palette = computeInventoryPreviewPalette(item);
 
   ctx.fillStyle = "#0b1525";
   ctx.fillRect(0, 0, width, height);
   ctx.fillStyle = "rgba(15, 30, 52, 0.9)";
-  ctx.fillRect(1, 1, width - 2, height - 2);
-  ctx.strokeStyle = "rgba(56, 189, 248, 0.2)";
+  ctx.fillRect(0.5, 0.5, width - 1, height - 1);
+  ctx.strokeStyle = palette.frame;
+  ctx.lineWidth = 0.6;
   ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
 
   const drewDxf = String(item?.sourceType || "").toLowerCase() === PART_KIND_DXF
-    ? drawDxfContourPreview(ctx, item, width, height)
+    ? drawDxfContourPreview(ctx, item, width, height, palette)
     : false;
-  if (!drewDxf) drawInventoryFallbackPreview(ctx, item, width, height);
+  if (!drewDxf) drawInventoryFallbackPreview(ctx, item, width, height, palette);
 
   try {
     return canvas.toDataURL("image/webp", 0.74);
@@ -4737,7 +4853,7 @@ function createInventoryCardElement(item) {
     `<div class="inventory-card-meta">${formatInventorySizeLabel(item.width, item.height)}</div>` +
     `<div class="inventory-card-meta">${formatInventoryTypeLabel(item.sourceType)}</div>` +
     `<div class="inventory-qty-wrap">` +
-    `<span class="inventory-qty-label">pç:</span>` +
+    `<span class="inventory-qty-label">Qtd:</span>` +
     `<input class="inventory-qty-input" type="number" min="0" step="1" data-item-id="${item.id}" value="${Math.max(0, Math.round(Number(item.quantity || 0)))}" />` +
     `</div>`;
   return card;
@@ -4805,6 +4921,7 @@ function removeInventoryItemById(itemId) {
   const item = inventoryItems[idx];
   disposeInventoryTemplateGroup(item);
   inventoryItems.splice(idx, 1);
+  if (inventoryItems.length === 0) inventoryColorCursor = 0;
   return true;
 }
 
@@ -4830,6 +4947,7 @@ function applyInventoryQuantity(itemId, quantityValue) {
     const item = inventoryItems[idx];
     disposeInventoryTemplateGroup(item);
     inventoryItems.splice(idx, 1);
+    if (inventoryItems.length === 0) inventoryColorCursor = 0;
     return true;
   }
   inventoryItems[idx].quantity = normalized;
@@ -4854,9 +4972,11 @@ function upsertInventoryItem(payload) {
     if (!existing.stepPayload && payload?.stepPayload) existing.stepPayload = payload.stepPayload;
     if (!existing.templateSnapshot && payload?.templateSnapshot) existing.templateSnapshot = payload.templateSnapshot;
     if (!existing.templateGroup && payload?.templateGroup) existing.templateGroup = payload.templateGroup;
+    if (!existing.previewColor) existing.previewColor = buildInventoryPreviewColorProfile(key);
     return true;
   }
 
+  const previewColor = buildInventoryPreviewColorProfile(key);
   inventoryItems.push({
     id: inventoryNextId++,
     mergeKey: key,
@@ -4873,7 +4993,8 @@ function upsertInventoryItem(payload) {
     meshCacheKey: payload?.meshCacheKey ? String(payload.meshCacheKey) : "",
     stepPayload: payload?.stepPayload || null,
     templateSnapshot: payload?.templateSnapshot || null,
-    templateGroup: payload?.templateGroup || null
+    templateGroup: payload?.templateGroup || null,
+    previewColor
   });
   return true;
 }
@@ -5714,6 +5835,7 @@ clearBtn.addEventListener("click", () => {
   }
   disposeAllInventoryTemplateGroups();
   inventoryItems.length = 0;
+  inventoryColorCursor = 0;
   inventoryPreviewCache.clear();
   inventoryPreviewPending.clear();
   disposeInactiveProxyInstancedMesh();
