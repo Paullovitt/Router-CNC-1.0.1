@@ -952,22 +952,15 @@ function createSheetBorderLine(minX, minY, maxX, maxY, colorHex) {
   return new THREE.Line(geometry, material);
 }
 
-function createSheetThicknessGuides(minX, minY, maxX, maxY, topZ, bottomZ, colorHex) {
-  const vertices = new Float32Array([
-    minX, minY, topZ, minX, minY, bottomZ,
-    maxX, minY, topZ, maxX, minY, bottomZ,
-    maxX, maxY, topZ, maxX, maxY, bottomZ,
-    minX, maxY, topZ, minX, maxY, bottomZ
-  ]);
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(vertices, 3));
-  const material = new THREE.LineBasicMaterial({
+function createSheetVolumeEdges(boxGeometry, colorHex) {
+  const edgeGeometry = new THREE.EdgesGeometry(boxGeometry);
+  const edgeMaterial = new THREE.LineBasicMaterial({
     color: colorHex,
     transparent: true,
     opacity: 0.92,
     toneMapped: false
   });
-  return new THREE.LineSegments(geometry, material);
+  return new THREE.LineSegments(edgeGeometry, edgeMaterial);
 }
 
 function rebuildSheetsVisuals() {
@@ -1000,16 +993,12 @@ function rebuildSheetsVisuals() {
     bodyMesh.userData.sheetIndex = idx;
     wrapper.add(bodyMesh);
 
-    const thicknessGuides = createSheetThicknessGuides(
-      Number(sheet.originX),
-      Number(sheet.originY),
-      Number(sheet.originX) + Number(sheet.width),
-      Number(sheet.originY) + Number(sheet.height),
-      0,
-      -thickness,
+    const thicknessEdges = createSheetVolumeEdges(
+      bodyGeo,
       isActive ? 0x22d3ee : 0x475569
     );
-    wrapper.add(thicknessGuides);
+    thicknessEdges.position.set(centerX, centerY, plateZ);
+    wrapper.add(thicknessEdges);
 
     const border = createSheetBorderLine(
       Number(sheet.originX),

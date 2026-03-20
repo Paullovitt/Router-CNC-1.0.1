@@ -12,16 +12,17 @@ function readAppJs() {
   return fs.readFileSync(path.join(projectRoot, "app.js"), "utf8");
 }
 
-test("visual da chapa possui helper para guias de vertice da espessura", () => {
+test("visual da chapa possui helper para arestas 3D da espessura", () => {
   const appJs = readAppJs();
-  assert.match(appJs, /function createSheetThicknessGuides\(minX, minY, maxX, maxY, topZ, bottomZ, colorHex\)/);
-  assert.match(appJs, /const vertices = new Float32Array\(\[/);
-  assert.match(appJs, /new THREE\.LineSegments\(geometry, material\)/);
+  assert.match(appJs, /function createSheetVolumeEdges\(boxGeometry, colorHex\)/);
+  assert.match(appJs, /new THREE\.EdgesGeometry\(boxGeometry\)/);
+  assert.match(appJs, /new THREE\.LineSegments\(edgeGeometry, edgeMaterial\)/);
 });
 
-test("rebuildSheetsVisuals adiciona so guias de vertice sem borda interna util", () => {
+test("rebuildSheetsVisuals adiciona arestas da espessura sem borda interna util", () => {
   const appJs = readAppJs();
-  assert.match(appJs, /const thicknessGuides = createSheetThicknessGuides\(/);
-  assert.match(appJs, /wrapper\.add\(thicknessGuides\);/);
+  assert.match(appJs, /const thicknessEdges = createSheetVolumeEdges\(/);
+  assert.match(appJs, /thicknessEdges\.position\.set\(centerX, centerY, plateZ\);/);
+  assert.match(appJs, /wrapper\.add\(thicknessEdges\);/);
   assert.doesNotMatch(appJs, /usableBorder/);
 });
