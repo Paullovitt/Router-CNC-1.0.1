@@ -1,25 +1,40 @@
-# DXFs 3D Viewer com Layout por Chapas
+# Router CNC - DXF/STEP 3D Viewer com Layout por Chapas
 
-Visualizador 3D para DXF e STEP/STP com fluxo de nesting manual em chapas, com DXF em modo browser/WebGL (GPU) e sem seletor CPU no frontend.
+Aplicacao para importacao de DXF e STEP/STP, visualizacao 3D em WebGL e distribuicao de pecas em chapas CNC com foco em desempenho.
 
 ## Objetivo do projeto
 
-Permitir importacao e visualizacao 3D de pecas DXF/STEP com um layout de producao orientado a chapas CNC:
+Permitir importacao e visualizacao 3D de pecas DXF/STEP com um fluxo de producao orientado a chapas CNC:
 
 - criar multiplas chapas
 - selecionar chapa ativa
 - posicionar pecas automaticamente dentro da area util da chapa
 - mover pecas para outra chapa sem sair dos limites configurados
+- gerenciar estoque de pecas importadas antes de montar nas chapas
+
+## Novidades recentes
+
+- painel direito de `Pecas importadas` com busca por codigo e filtro por tipo (`.DXF` / `.STEP`)
+- cards de pecas com miniatura lazy e cache em WebP
+- miniaturas com paleta de cores variada por peca (deterministica), evitando repeticao visual
+- campo `Qtd` por item no estoque (Enter confirma, `0` remove o item)
+- botoes de montagem:
+  - `Chapa`: monta na chapa ativa
+  - `Montar chapas`: distribui em todas as chapas
+- badge de FPS no viewport para monitorar performance em tempo real
+- renderizacao de proxies instanciados (WebGL2) para pecas de chapas inativas
+- sincronizacao da espessura das pecas DXF com a espessura da chapa ativa
 
 ## Arquitetura do sistema
 
 ### Frontend (browser)
 
-- `index.html`: estrutura da tela (toolbar, dock de chapas, viewport 3D, modal de edicao de chapa)
+- `index.html`: estrutura da tela (toolbar, dock de chapas, viewport 3D, dock de estoque, modal de edicao de chapa)
 - `styles.css`: tema e layout responsivo
-- `app.js`: renderizacao Three.js, importacao DXF browser-only, importacao STEP, selecao/transform, estado de chapas
-- `app.js`: inclui ajuste dinamico de `near/far` da camera para reduzir artefatos de profundidade em zoom distante
-- `app.js`: sincroniza espessura das pecas DXF com a espessura da chapa (STEP permanece com logica propria)
+- `app.js`: renderizacao Three.js/WebGL, importacao DXF browser-only, importacao STEP, selecao/transform, estado de chapas e estoque
+- `app.js`: ajuste dinamico de `near/far` da camera para reduzir artefatos de profundidade em zoom distante
+- `app.js`: proxies instanciados para chapas inativas (pipeline com shader custom e atributos de instancia)
+- `app.js`: miniaturas das pecas com geracao por canvas, cores por item e cache
 - `sheet-layout.js`: funcoes puras de layout (origem de chapas, area util, encaixe sem colisao)
 - `dxf-worker.js`: parse DXF em paralelo no browser
 
@@ -30,7 +45,7 @@ Permitir importacao e visualizacao 3D de pecas DXF/STEP com um layout de produca
 
 ### Testes
 
-- `tests/sheet-layout.test.mjs`: testes automatizados das regras de layout de chapas
+- `tests/*.test.mjs`: validacao de layout de chapas, UI de estoque, modal de chapa, badge FPS, atalhos e regressao visual/logica
 
 ## Dependencias necessarias
 
@@ -79,20 +94,26 @@ Abra no navegador:
 ## Como usar (exemplo rapido)
 
 1. Clique em `Importar DXF(s)` ou `Importar STEP(s)`.
-2. Use `Nova chapa` para criar outra chapa.
-3. Clique em uma chapa no painel lateral para ativar.
-4. As chapas ficam em layout circular no viewport; ao selecionar outra chapa, ocorre transicao para trazer a selecionada ao centro (sem giro continuo).
-5. Use `Mover para chapa` para enviar a peca selecionada para a chapa ativa.
-6. Use `Editar chapa` para ajustar largura, altura, margens e espacamento.
-7. No modal:
+2. Os arquivos entram primeiro no painel `Pecas importadas`.
+3. Ajuste `Qtd` por item, filtre e pesquise se necessario.
+4. Use `Chapa` para montar na chapa ativa ou `Montar chapas` para distribuir em todas.
+5. Use `Nova chapa` para criar outra chapa.
+6. Clique em uma chapa no painel lateral para ativar.
+7. As chapas ficam em layout circular no viewport; ao selecionar outra chapa, ocorre transicao para trazer a selecionada ao centro (sem giro continuo).
+8. Use `Mover para chapa` para enviar a peca selecionada para a chapa ativa.
+9. Use `Editar chapa` para ajustar largura, altura, margens e espacamento.
+10. No modal:
    - `Aplicar`: altera somente a chapa ativa.
    - `Aplicar em todas`: altera todas as chapas atuais e vira padrao para novas chapas.
-8. Clique em `Enquadrar (Fit)` para centralizar a visualizacao.
+11. Clique em `Enquadrar (Fit)` para centralizar a visualizacao.
 
 ## Principais modulos/funcoes
 
 - `assignPartToSheet` (`app.js`): aloca peca em chapa com fallback para nova chapa
 - `relayoutSheetPieces` (`app.js`): reorganiza pecas apos alterar parametros da chapa
+- `mountInventoryToSheets` (`app.js`): monta pecas do estoque em chapa ativa ou em todas
+- `computeInventoryPreviewPalette` (`app.js`): define paleta de miniatura por peca
+- `syncInactiveProxyInstancing` (`app.js`): atualiza proxies instanciados para chapas inativas
 - `findPlacementOnSheet` (`sheet-layout.js`): calcula primeira posicao valida sem colisao
 - `getSheetUsableBounds` (`sheet-layout.js`): calcula area util com margens
 
@@ -112,6 +133,11 @@ Cobertura atual dos testes:
 - deteccao de colisao com espacamento
 - busca de posicao valida para encaixe
 - falha esperada quando a peca nao cabe
+- painel e fluxo de estoque de pecas
+- renderizacao incremental/lazy do estoque
+- badge de FPS
+- atalhos de teclado para remocao
+- pipeline de instancing para proxies inativos
 
 ## Endpoints locais
 
@@ -121,3 +147,6 @@ Cobertura atual dos testes:
 ## Licenca
 
 Este projeto esta sob a licenca MIT. Veja o arquivo `LICENSE` para os detalhes completos.
+
+Autor: Paulo Augusto  
+Ano: 2026
