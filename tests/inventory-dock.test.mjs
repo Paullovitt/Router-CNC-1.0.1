@@ -31,7 +31,7 @@ test("estoque soma duplicadas por codigo e tipo", () => {
 test("quantidade no card confirma com Enter e 0 remove item", () => {
   const appJs = readProjectFile("app.js");
   assert.match(appJs, /function applyInventoryQuantity\(itemId, quantityValue\)/);
-  assert.match(appJs, /if \(normalized <= 0\) \{\s*inventoryItems\.splice\(idx, 1\);/);
+  assert.match(appJs, /if \(normalized <= 0\) \{\s*const item = inventoryItems\[idx\];\s*disposeInventoryTemplateGroup\(item\);\s*inventoryItems\.splice\(idx, 1\);/);
   assert.match(appJs, /if \(event\.key !== "Enter"\) return;/);
   assert.match(appJs, /applyInventoryQuantity\(itemId, Number\(target\.value\)\);/);
 });
@@ -52,6 +52,14 @@ test("card usa thumbnail lazy com preview em WebP e label de quantidade simplifi
   assert.match(appJs, /<span class="inventory-qty-label">pç:<\/span>/);
   assert.match(appJs, /toDataURL\("image\/webp", 0\.74\)/);
   assert.match(appJs, /observeInventoryPreviewImages\(\);/);
+});
+
+test("montagem reutiliza template em memoria e clona grupo para reduzir custo por peça", () => {
+  const appJs = readProjectFile("app.js");
+  assert.match(appJs, /if \(item\.templateGroup && item\.templateGroup\.isObject3D\)/);
+  assert.match(appJs, /const fromSnapshot = buildGroupFromMeshSnapshot\(item\.templateSnapshot, item\.fileName \|\| ""\);/);
+  assert.match(appJs, /item\.templateGroup = templateGroup;/);
+  assert.match(appJs, /const group = item\.templateGroup\?\.clone\(true\) \|\| null;/);
 });
 
 test("estoque renderiza cards em blocos e carrega mais no scroll", () => {

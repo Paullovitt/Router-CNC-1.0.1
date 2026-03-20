@@ -4151,9 +4151,21 @@ const inventorySearchInput = document.getElementById("inventorySearch");
 const inventoryTypeFilterEl = document.getElementById("inventoryTypeFilter");
 const mountActiveSheetBtn = document.getElementById("mountActiveSheetBtn");
 const mountAllSheetsBtn = document.getElementById("mountAllSheetsBtn");
+const fpsBadgeEl = document.getElementById("fpsBadge");
 
 if (runtimeModeEl) {
   runtimeModeEl.textContent = "Render: GPU (WebGL)";
+}
+
+let fpsFrameCounter = 0;
+let fpsAccumMs = 0;
+let fpsLastFrameTs = 0;
+let fpsDisplayValue = 0;
+
+function updateFpsBadgeText(fps = 0) {
+  if (!fpsBadgeEl) return;
+  const value = Number.isFinite(fps) ? Math.max(0, Math.round(fps)) : 0;
+  fpsBadgeEl.textContent = `FPS: ${value}`;
 }
 
 function updatePieceCountBadge() {
@@ -4528,8 +4540,20 @@ function removeInventoryItemById(itemId) {
   const id = Number(itemId);
   const idx = inventoryItems.findIndex((entry) => Number(entry?.id) === id);
   if (idx < 0) return false;
+  const item = inventoryItems[idx];
+  disposeInventoryTemplateGroup(item);
   inventoryItems.splice(idx, 1);
   return true;
+}
+
+function disposeInventoryTemplateGroup(item) {
+  if (!item?.templateGroup || !item.templateGroup.isObject3D) return;
+  disposeObject3D(item.templateGroup);
+  item.templateGroup = null;
+}
+
+function disposeAllInventoryTemplateGroups() {
+  for (const item of inventoryItems) disposeInventoryTemplateGroup(item);
 }
 
 function applyInventoryQuantity(itemId, quantityValue) {
@@ -4541,6 +4565,8 @@ function applyInventoryQuantity(itemId, quantityValue) {
   if (!Number.isFinite(parsed)) return false;
   const normalized = Math.max(0, Math.round(parsed));
   if (normalized <= 0) {
+    const item = inventoryItems[idx];
+    disposeInventoryTemplateGroup(item);
     inventoryItems.splice(idx, 1);
     return true;
   }
@@ -4565,6 +4591,7 @@ function upsertInventoryItem(payload) {
     if (!existing.meshCacheKey && payload?.meshCacheKey) existing.meshCacheKey = String(payload.meshCacheKey);
     if (!existing.stepPayload && payload?.stepPayload) existing.stepPayload = payload.stepPayload;
     if (!existing.templateSnapshot && payload?.templateSnapshot) existing.templateSnapshot = payload.templateSnapshot;
+    if (!existing.templateGroup && payload?.templateGroup) existing.templateGroup = payload.templateGroup;
     return true;
   }
 
@@ -4583,7 +4610,8 @@ function upsertInventoryItem(payload) {
     stepText: payload?.stepText || "",
     meshCacheKey: payload?.meshCacheKey ? String(payload.meshCacheKey) : "",
     stepPayload: payload?.stepPayload || null,
-    templateSnapshot: payload?.templateSnapshot || null
+    templateSnapshot: payload?.templateSnapshot || null,
+    templateGroup: payload?.templateGroup || null
   });
   return true;
 }
@@ -5143,7 +5171,24 @@ async function prepareStepInventoryItemFromFile(file, onIssue = null) {
 
 async function ensureInventoryTemplateSnapshot(item, onIssue = null) {
   if (!item || Number(item.quantity || 0) <= 0) return false;
-  if (item.templateSnapshot) return true;
+  if (item.templateGroup && item.templateGroup.isObject3D) {
+    if (!item.templateSnapshot) {
+      const snapshotThickness = String(item.sourceType || "").toLowerCase() === PART_KIND_DXF
+        ? Number(item.sourceThickness || DEFAULT_PART_THICKNESS)
+        : 0;
+      item.templateSnapshot = serializeMeshGroupSnapshot(item.templateGroup, snapshotThickness);
+    }
+    return !!item.templateSnapshot;
+  }
+
+  if (item.templateSnapshot) {
+    const fromSnapshot = buildGroupFromMeshSnapshot(item.templateSnapshot, item.fileName || "");
+    if (fromSnapshot) {
+      item.templateGroup = fromSnapshot;
+      return true;
+    }
+    item.templateSnapshot = null;
+  }
 
   let templateGroup = null;
   if (String(item.sourceType || "").toLowerCase() === PART_KIND_DXF) {
@@ -5186,16 +5231,16 @@ async function ensureInventoryTemplateSnapshot(item, onIssue = null) {
     ? Number(item.sourceThickness || DEFAULT_PART_THICKNESS)
     : 0;
   const snapshot = serializeMeshGroupSnapshot(templateGroup, snapshotThickness);
-  disposeObject3D(templateGroup);
   if (!snapshot) return false;
   item.templateSnapshot = snapshot;
+  item.templateGroup = templateGroup;
   return true;
 }
 
 async function createSceneGroupFromInventoryItem(item, onIssue = null) {
   const okTemplate = await ensureInventoryTemplateSnapshot(item, onIssue);
   if (!okTemplate) return null;
-  const group = buildGroupFromMeshSnapshot(item.templateSnapshot, item.fileName || "");
+  const group = item.templateGroup?.clone(true) || null;
   if (!group) return null;
   group.name = String(item.fileName || `${item.code || "peca"}.dxf`);
   if (String(item.sourceType || "").toLowerCase() === PART_KIND_DXF) {
@@ -5206,7 +5251,11 @@ async function createSceneGroupFromInventoryItem(item, onIssue = null) {
 
 function pruneEmptyInventoryItems() {
   for (let idx = inventoryItems.length - 1; idx >= 0; idx -= 1) {
-    if (Number(inventoryItems[idx]?.quantity || 0) <= 0) inventoryItems.splice(idx, 1);
+    if (Number(inventoryItems[idx]?.quantity || 0) <= 0) {
+      const item = inventoryItems[idx];
+      disposeInventoryTemplateGroup(item);
+      inventoryItems.splice(idx, 1);
+    }
   }
 }
 
@@ -5401,6 +5450,7 @@ clearBtn.addEventListener("click", () => {
     partsGroup.remove(child);
     disposeObject3D(child);
   }
+  disposeAllInventoryTemplateGroups();
   inventoryItems.length = 0;
   inventoryPreviewCache.clear();
   inventoryPreviewPending.clear();
@@ -5412,6 +5462,7 @@ clearBtn.addEventListener("click", () => {
 });
 
 window.addEventListener("beforeunload", () => {
+  disposeAllInventoryTemplateGroups();
   if (dxfWorkerPool && typeof dxfWorkerPool.terminate === "function") {
     dxfWorkerPool.terminate();
   }
@@ -5422,6 +5473,19 @@ window.addEventListener("beforeunload", () => {
 // ---------------------------
 function animate() {
   requestAnimationFrame(animate);
+  const now = performance.now();
+  if (fpsLastFrameTs > 0) {
+    fpsAccumMs += Math.max(0, now - fpsLastFrameTs);
+    fpsFrameCounter += 1;
+  }
+  fpsLastFrameTs = now;
+  if (fpsAccumMs >= 500) {
+    fpsDisplayValue = fpsFrameCounter > 0 ? (fpsFrameCounter * 1000) / fpsAccumMs : 0;
+    updateFpsBadgeText(fpsDisplayValue);
+    fpsAccumMs = 0;
+    fpsFrameCounter = 0;
+  }
+
   if (!bboxAll.isEmpty()) {
     bboxAll.getSize(cameraDepthSizeVec);
     const maxDim = Math.max(cameraDepthSizeVec.x, cameraDepthSizeVec.y, cameraDepthSizeVec.z);
@@ -5434,4 +5498,5 @@ function animate() {
   controls.update();
   renderer.render(scene, camera);
 }
+updateFpsBadgeText(0);
 animate();
