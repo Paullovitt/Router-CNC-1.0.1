@@ -4642,6 +4642,106 @@ function drawInventoryFallbackPreview(ctx, item, canvasWidth, canvasHeight, pale
   ctx.stroke();
 }
 
+function pointToSegmentDistanceSq(px, py, ax, ay, bx, by) {
+  const abx = bx - ax;
+  const aby = by - ay;
+  const apx = px - ax;
+  const apy = py - ay;
+  const lenSq = (abx * abx) + (aby * aby);
+  if (lenSq <= EPS) {
+    const dx = px - ax;
+    const dy = py - ay;
+    return (dx * dx) + (dy * dy);
+  }
+  const t = Math.max(0, Math.min(1, ((apx * abx) + (apy * aby)) / lenSq));
+  const qx = ax + (abx * t);
+  const qy = ay + (aby * t);
+  const dx = px - qx;
+  const dy = py - qy;
+  return (dx * dx) + (dy * dy);
+}
+
+function simplifyPolylineRdp(points, epsilon) {
+  if (!Array.isArray(points) || points.length <= 2) return Array.isArray(points) ? points.slice() : [];
+  const epsilonSq = Math.max(EPS, Number(epsilon || 0)) ** 2;
+  const count = points.length;
+  const keep = new Uint8Array(count);
+  keep[0] = 1;
+  keep[count - 1] = 1;
+  const stack = [[0, count - 1]];
+
+  while (stack.length > 0) {
+    const [startIdx, endIdx] = stack.pop();
+    if (endIdx - startIdx <= 1) continue;
+    const a = points[startIdx];
+    const b = points[endIdx];
+    let bestIdx = -1;
+    let bestDistSq = 0;
+    for (let idx = startIdx + 1; idx < endIdx; idx += 1) {
+      const p = points[idx];
+      const distSq = pointToSegmentDistanceSq(p.x, p.y, a.x, a.y, b.x, b.y);
+      if (distSq > bestDistSq) {
+        bestDistSq = distSq;
+        bestIdx = idx;
+      }
+    }
+    if (bestIdx > startIdx && bestIdx < endIdx && bestDistSq > epsilonSq) {
+      keep[bestIdx] = 1;
+      stack.push([startIdx, bestIdx], [bestIdx, endIdx]);
+    }
+  }
+
+  const out = [];
+  for (let idx = 0; idx < count; idx += 1) {
+    if (keep[idx]) out.push(points[idx]);
+  }
+  return out.length >= 2 ? out : points.slice(0, 2);
+}
+
+function simplifyPreviewContourPoints(pointsRaw, maxPoints = 1400) {
+  const points = [];
+  for (const raw of (pointsRaw || [])) {
+    const x = Number(Array.isArray(raw) ? raw[0] : raw?.x);
+    const y = Number(Array.isArray(raw) ? raw[1] : raw?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    const prev = points[points.length - 1];
+    if (prev && Math.abs(prev.x - x) <= 1e-9 && Math.abs(prev.y - y) <= 1e-9) continue;
+    points.push({ x, y });
+  }
+  if (points.length <= 2 || points.length <= maxPoints) return points;
+
+  let minX = points[0].x;
+  let minY = points[0].y;
+  let maxX = points[0].x;
+  let maxY = points[0].y;
+  for (const p of points) {
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+  }
+  const diag = Math.hypot(maxX - minX, maxY - minY);
+  let epsilon = Math.max(0.005, diag * 0.00014);
+  let simplified = points;
+
+  for (let iter = 0; iter < 10 && simplified.length > maxPoints; iter += 1) {
+    simplified = simplifyPolylineRdp(points, epsilon);
+    epsilon *= 1.7;
+  }
+
+  if (simplified.length > maxPoints) {
+    const stride = Math.max(1, Math.ceil(simplified.length / maxPoints));
+    const compact = [simplified[0]];
+    for (let idx = stride; idx < simplified.length - 1; idx += stride) {
+      compact.push(simplified[idx]);
+    }
+    compact.push(simplified[simplified.length - 1]);
+    simplified = compact;
+  }
+
+  return simplified;
+}
+
 function drawDxfContourPreview(ctx, item, canvasWidth, canvasHeight, palette = null) {
   const colors = palette || computeInventoryPreviewPalette(item);
   const contoursRaw = Array.isArray(item?.preParsed?.contours) ? item.preParsed.contours : [];
@@ -4656,14 +4756,10 @@ function drawDxfContourPreview(ctx, item, canvasWidth, canvasHeight, palette = n
   for (const contour of contoursRaw) {
     const pointsRaw = Array.isArray(contour?.points) ? contour.points : [];
     if (pointsRaw.length < 2) continue;
-    const points = [];
-    const stride = Math.max(1, Math.ceil(pointsRaw.length / 320));
-    for (let idx = 0; idx < pointsRaw.length; idx += stride) {
-      const p = pointsRaw[idx];
-      const x = Number(Array.isArray(p) ? p[0] : p?.x);
-      const y = Number(Array.isArray(p) ? p[1] : p?.y);
-      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-      points.push({ x, y });
+    const points = simplifyPreviewContourPoints(pointsRaw, 1400);
+    for (const p of points) {
+      const x = p.x;
+      const y = p.y;
       if (x < minX) minX = x;
       if (y < minY) minY = y;
       if (x > maxX) maxX = x;

@@ -65,6 +65,14 @@ test("miniatura usa paleta de cor por peca com hash deterministico", () => {
   assert.match(appJs, /drawDxfContourPreview\(ctx, item, width, height, palette\)/);
 });
 
+test("preview DXF do card usa simplificacao adaptativa sem stride fixo", () => {
+  const appJs = readProjectFile("app.js");
+  assert.match(appJs, /function simplifyPolylineRdp\(points, epsilon\)/);
+  assert.match(appJs, /function simplifyPreviewContourPoints\(pointsRaw, maxPoints = 1400\)/);
+  assert.match(appJs, /const points = simplifyPreviewContourPoints\(pointsRaw, 1400\);/);
+  assert.doesNotMatch(appJs, /Math\.ceil\(pointsRaw\.length \/ 320\)/);
+});
+
 test("montagem reutiliza template em memoria e clona grupo para reduzir custo por peÃ§a", () => {
   const appJs = readProjectFile("app.js");
   assert.match(appJs, /if \(item\.templateGroup && item\.templateGroup\.isObject3D\)/);
