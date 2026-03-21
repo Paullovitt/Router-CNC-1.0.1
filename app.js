@@ -5860,6 +5860,236 @@ function pruneEmptyInventoryItems() {
   }
 }
 
+function buildInventoryMountQueue() {
+  const queue = [];
+  for (const item of inventoryItems) {
+    const quantity = Math.max(0, Math.trunc(Number(item?.quantity || 0)));
+    const width = Math.max(0, Number(item?.width || 0));
+    const height = Math.max(0, Number(item?.height || 0));
+    if (!item || quantity <= 0 || width <= EPS || height <= EPS) continue;
+    const area = width * height;
+    const maxSide = Math.max(width, height);
+    const minSide = Math.min(width, height);
+    for (let n = 0; n < quantity; n += 1) {
+      queue.push({ item, area, maxSide, minSide });
+    }
+  }
+  queue.sort((a, b) => {
+    const areaDelta = Number(b.area) - Number(a.area);
+    if (Math.abs(areaDelta) > EPS) return areaDelta;
+    const sideDelta = Number(b.maxSide) - Number(a.maxSide);
+    if (Math.abs(sideDelta) > EPS) return sideDelta;
+    return Number(a.minSide) - Number(b.minSide);
+  });
+  return queue;
+}
+
+function buildMountSheetOrder(acrossAllSheets) {
+  const active = getValidSheetIndex(activeSheetIndex);
+  const fallback = getValidSheetIndex(0);
+  const target = active >= 0 ? active : fallback;
+  if (target < 0) return [];
+
+  if (!acrossAllSheets) return [target];
+  const order = [target];
+  for (let idx = 0; idx < sheetState.length; idx += 1) {
+    if (idx !== target) order.push(idx);
+  }
+  return order;
+}
+
+function appendSheetForMounting() {
+  const sheet = createSheetFrom();
+  sheetState.push(sheet);
+  inactiveProxyDirty = true;
+  return sheetState.length - 1;
+}
+
+function getItemOrientationCandidates(item) {
+  const width = Math.max(0, Number(item?.width || 0));
+  const height = Math.max(0, Number(item?.height || 0));
+  if (width <= EPS || height <= EPS) return [];
+  const candidates = [{ width, height, rotationZ: 0 }];
+  if (Math.abs(width - height) > 1e-5) {
+    candidates.push({ width: height, height: width, rotationZ: Math.PI * 0.5 });
+  }
+  return candidates;
+}
+
+function createSheetMountContext(sheetIndex) {
+  const idx = getValidSheetIndex(sheetIndex);
+  if (idx < 0) return null;
+  const sheet = sheetState[idx];
+  if (!sheet) return null;
+  const usable = getSheetUsableBounds(sheet, sheet.originX, sheet.originY);
+  const occupiedBoxes = occupiedBoxesForSheet(idx);
+  let usedArea = 0;
+  for (const box of occupiedBoxes) {
+    const width = Math.max(0, Number(box.maxX) - Number(box.minX));
+    const height = Math.max(0, Number(box.maxY) - Number(box.minY));
+    usedArea += width * height;
+  }
+  return {
+    sheetIndex: idx,
+    spacing: Math.max(0, Number(sheet.spacing || 0)),
+    usable,
+    usableArea: Math.max(EPS, Number(usable.width) * Number(usable.height)),
+    usedArea,
+    occupiedBoxes
+  };
+}
+
+function computeNestingCandidateScore(context, placement, width, height, sheetRank) {
+  const itemArea = Math.max(EPS, Number(width) * Number(height));
+  const usedAfter = Math.min(context.usableArea, context.usedArea + itemArea);
+  const fillRatio = usedAfter / context.usableArea;
+  const yNorm = (Number(placement.y) - Number(context.usable.minY)) / Math.max(EPS, Number(context.usable.height));
+  const xNorm = (Number(placement.x) - Number(context.usable.minX)) / Math.max(EPS, Number(context.usable.width));
+  return (sheetRank * 1e6) + ((1 - fillRatio) * 4500) + (yNorm * 40) + (xNorm * 10);
+}
+
+function findBestNestingCandidateForItem(item, sheetOrder, sheetContextMap) {
+  const orientations = getItemOrientationCandidates(item);
+  if (orientations.length === 0) return null;
+  let best = null;
+
+  for (let rank = 0; rank < sheetOrder.length; rank += 1) {
+    const sheetIndex = sheetOrder[rank];
+    const context = sheetContextMap.get(sheetIndex);
+    if (!context) continue;
+
+    for (const orientation of orientations) {
+      const placement = findPlacementOnSheet({
+        partWidth: orientation.width,
+        partHeight: orientation.height,
+        usableBounds: context.usable,
+        occupiedBoxes: context.occupiedBoxes,
+        spacing: context.spacing
+      });
+      if (!placement) continue;
+
+      const score = computeNestingCandidateScore(
+        context,
+        placement,
+        orientation.width,
+        orientation.height,
+        rank
+      );
+
+      if (!best || score < best.score) {
+        best = {
+          score,
+          sheetIndex,
+          x: Number(placement.x),
+          y: Number(placement.y),
+          width: Number(orientation.width),
+          height: Number(orientation.height),
+          rotationZ: Number(orientation.rotationZ || 0)
+        };
+      }
+    }
+  }
+  return best;
+}
+
+function getPartBoundsAs2DBox(part) {
+  const bounds = getCachedPartBounds(part);
+  if (!bounds) return null;
+  return {
+    minX: Number(bounds.min.x),
+    minY: Number(bounds.min.y),
+    maxX: Number(bounds.max.x),
+    maxY: Number(bounds.max.y)
+  };
+}
+
+function registerMountedPartInContext(sheetContextMap, sheetIndex, part) {
+  const idx = getValidSheetIndex(sheetIndex);
+  if (idx < 0) return;
+  let context = sheetContextMap.get(idx);
+  if (!context) {
+    context = createSheetMountContext(idx);
+    if (!context) return;
+    sheetContextMap.set(idx, context);
+  }
+  const box = getPartBoundsAs2DBox(part);
+  if (!box) return;
+  context.occupiedBoxes.push(box);
+  const width = Math.max(0, Number(box.maxX) - Number(box.minX));
+  const height = Math.max(0, Number(box.maxY) - Number(box.minY));
+  context.usedArea += width * height;
+}
+
+function isPartPlacementValidOnSheet(part, sheetIndex) {
+  const idx = getValidSheetIndex(sheetIndex);
+  if (idx < 0 || !part) return false;
+  const sheet = sheetState[idx];
+  if (!sheet) return false;
+  const box = getPartBoundsAs2DBox(part);
+  if (!box) return false;
+  const usable = getSheetUsableBounds(sheet, sheet.originX, sheet.originY);
+  if (
+    box.minX + EPS < usable.minX ||
+    box.minY + EPS < usable.minY ||
+    box.maxX - EPS > usable.maxX ||
+    box.maxY - EPS > usable.maxY
+  ) {
+    return false;
+  }
+  const occupied = occupiedBoxesForSheet(idx, part);
+  for (const other of occupied) {
+    if (boxesIntersectWithSpacing(box, other, Number(sheet.spacing || 0))) return false;
+  }
+  return true;
+}
+
+function applyMountCandidateToGroup(group, candidate) {
+  if (!group || !candidate) return false;
+  const sheet = sheetState[candidate.sheetIndex];
+  if (!sheet) return false;
+  group.rotation.z = Number(candidate.rotationZ || 0);
+  cachePartBounds(group);
+  const bounds = getCachedPartBounds(group);
+  if (!bounds) return false;
+
+  const dx = Number(candidate.x) - Number(bounds.min.x);
+  const dy = Number(candidate.y) - Number(bounds.min.y);
+  group.position.x += dx;
+  group.position.y += dy;
+  setPartZForSheet(group, sheet);
+  group.userData.sheetIndex = candidate.sheetIndex;
+  cachePartBounds(group);
+  return true;
+}
+
+function tryRecoverMountedGroupPlacement(group, preferredSheetIndex, acrossAllSheets, sheetOrder, sheetContextMap) {
+  const preferred = getValidSheetIndex(preferredSheetIndex);
+  if (preferred >= 0 && tryPlacePartOnSheet(group, preferred)) {
+    registerMountedPartInContext(sheetContextMap, preferred, group);
+    return preferred;
+  }
+
+  if (!acrossAllSheets) return -1;
+
+  for (const idx of sheetOrder) {
+    if (idx === preferred) continue;
+    if (tryPlacePartOnSheet(group, idx)) {
+      registerMountedPartInContext(sheetContextMap, idx, group);
+      return idx;
+    }
+  }
+
+  const newSheetIndex = appendSheetForMounting();
+  sheetOrder.push(newSheetIndex);
+  const newContext = createSheetMountContext(newSheetIndex);
+  if (newContext) sheetContextMap.set(newSheetIndex, newContext);
+  if (tryPlacePartOnSheet(group, newSheetIndex)) {
+    registerMountedPartInContext(sheetContextMap, newSheetIndex, group);
+    return newSheetIndex;
+  }
+  return -1;
+}
+
 async function mountInventoryToSheets({ acrossAllSheets = false } = {}) {
   if (inventoryBusy) return;
   if (inventoryItems.length === 0) return;
@@ -5869,34 +6099,85 @@ async function mountInventoryToSheets({ acrossAllSheets = false } = {}) {
   const mountStart = performance.now();
   const issues = [];
   let placedCount = 0;
+  let addedSheets = 0;
 
   try {
-    const preferredSheet = getValidSheetIndex(activeSheetIndex) >= 0 ? getValidSheetIndex(activeSheetIndex) : 0;
-    for (const item of inventoryItems) {
+    const queue = buildInventoryMountQueue();
+    if (queue.length === 0) return;
+
+    const blockedItemIds = new Set();
+    const sheetOrder = buildMountSheetOrder(!!acrossAllSheets);
+    const sheetContextMap = new Map();
+    for (const idx of sheetOrder) {
+      const context = createSheetMountContext(idx);
+      if (context) sheetContextMap.set(idx, context);
+    }
+
+    for (const unit of queue) {
+      const item = unit.item;
       if (!item || Number(item.quantity || 0) <= 0) continue;
+      if (blockedItemIds.has(Number(item.id))) continue;
 
-      while (Number(item.quantity || 0) > 0) {
-        const group = await createSceneGroupFromInventoryItem(item, (msg) => issues.push(msg));
-        if (!group) {
-          issues.push(`Falha ao montar template para ${item.code || item.fileName || "peça"}.`);
-          break;
-        }
-
-        const placed = finalizeImportedGroup(group, DEFAULT_AUTO_CENTER, {
-          preferredSheetIndex: preferredSheet,
-          allowCreateSheet: !!acrossAllSheets,
-          searchAllSheets: !!acrossAllSheets,
-          strictPlacement: true
-        });
-
-        if (!placed) break;
-        item.quantity = Math.max(0, Number(item.quantity || 0) - 1);
-        placedCount += 1;
+      let candidate = findBestNestingCandidateForItem(item, sheetOrder, sheetContextMap);
+      if (!candidate && acrossAllSheets) {
+        const newSheetIndex = appendSheetForMounting();
+        addedSheets += 1;
+        sheetOrder.push(newSheetIndex);
+        const context = createSheetMountContext(newSheetIndex);
+        if (context) sheetContextMap.set(newSheetIndex, context);
+        candidate = findBestNestingCandidateForItem(item, sheetOrder, sheetContextMap);
       }
+
+      if (!candidate) {
+        blockedItemIds.add(Number(item.id));
+        continue;
+      }
+
+      const group = await createSceneGroupFromInventoryItem(item, (msg) => issues.push(msg));
+      if (!group) {
+        issues.push(`Falha ao montar template para ${item.code || item.fileName || "peça"}.`);
+        blockedItemIds.add(Number(item.id));
+        continue;
+      }
+
+      partsGroup.add(group);
+      const mounted = applyMountCandidateToGroup(group, candidate);
+      let finalSheetIndex = mounted ? candidate.sheetIndex : -1;
+      if (!mounted || !isPartPlacementValidOnSheet(group, finalSheetIndex)) {
+        finalSheetIndex = tryRecoverMountedGroupPlacement(
+          group,
+          candidate.sheetIndex,
+          !!acrossAllSheets,
+          sheetOrder,
+          sheetContextMap
+        );
+      } else {
+        registerMountedPartInContext(sheetContextMap, finalSheetIndex, group);
+      }
+
+      if (finalSheetIndex < 0) {
+        partsGroup.remove(group);
+        disposeObject3D(group);
+        blockedItemIds.add(Number(item.id));
+        continue;
+      }
+
+      item.quantity = Math.max(0, Number(item.quantity || 0) - 1);
+      placedCount += 1;
+      inactiveProxyDirty = true;
+    }
+
+    if (addedSheets > 0) {
+      syncSheetsOrigins({ preservePartPositions: true });
+      rebuildSheetsVisuals();
     }
   } finally {
     pruneEmptyInventoryItems();
     updateInventoryListUi();
+    updateGlobalBounds();
+    updatePieceCountBadge();
+    updateSheetListUi();
+    updateSheetInfoBadge();
     updateBatchTimeBadge(performance.now() - mountStart);
     setInventoryBusyState(false);
   }

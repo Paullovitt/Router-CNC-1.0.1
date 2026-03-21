@@ -22,6 +22,7 @@ Permitir importacao e visualizacao 3D de pecas DXF/STEP com um fluxo de producao
 - botoes de montagem:
   - `Chapa`: monta na chapa ativa
   - `Montar chapas`: distribui em todas as chapas
+- montagem por nesting heuristico (ordenacao por area, orientacao 0/90, score de aproveitamento e checagem de colisao)
 - badge de FPS no viewport para monitorar performance em tempo real
 - renderizacao de proxies instanciados (WebGL2) para pecas de chapas inativas
 - sincronizacao da espessura das pecas DXF com a espessura da chapa ativa
@@ -113,6 +114,7 @@ Abra no navegador:
 - `assignPartToSheet` (`app.js`): aloca peca em chapa com fallback para nova chapa
 - `relayoutSheetPieces` (`app.js`): reorganiza pecas apos alterar parametros da chapa
 - `mountInventoryToSheets` (`app.js`): monta pecas do estoque em chapa ativa ou em todas
+- `findBestNestingCandidateForItem` (`app.js`): escolhe melhor encaixe por score em cada chapa/orientacao
 - `computeInventoryPreviewPalette` (`app.js`): define paleta de miniatura por peca
 - `syncInactiveProxyInstancing` (`app.js`): atualiza proxies instanciados para chapas inativas
 - `findPlacementOnSheet` (`sheet-layout.js`): calcula primeira posicao valida sem colisao

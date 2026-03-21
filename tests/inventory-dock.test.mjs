@@ -36,10 +36,13 @@ test("quantidade no card confirma com Enter e 0 remove item", () => {
   assert.match(appJs, /applyInventoryQuantity\(itemId, Number\(target\.value\)\);/);
 });
 
-test("botoes Chapa e Montar chapas montam sob demanda com strictPlacement", () => {
+test("botoes Chapa e Montar chapas usam nesting heuristico com colisao", () => {
   const appJs = readProjectFile("app.js");
   assert.match(appJs, /async function mountInventoryToSheets\(\{ acrossAllSheets = false \} = \{\}\)/);
-  assert.match(appJs, /strictPlacement: true/);
+  assert.match(appJs, /function findBestNestingCandidateForItem\(item, sheetOrder, sheetContextMap\)/);
+  assert.match(appJs, /function computeNestingCandidateScore\(context, placement, width, height, sheetRank\)/);
+  assert.match(appJs, /function isPartPlacementValidOnSheet\(part, sheetIndex\)/);
+  assert.match(appJs, /function tryRecoverMountedGroupPlacement\(/);
   assert.match(appJs, /if \(mountActiveSheetBtn\)\s*\{\s*mountActiveSheetBtn\.addEventListener\("click", async \(\) => \{\s*await mountInventoryToSheets\(\{ acrossAllSheets: false \}\);/);
   assert.match(appJs, /if \(mountAllSheetsBtn\)\s*\{\s*mountAllSheetsBtn\.addEventListener\("click", async \(\) => \{\s*await mountInventoryToSheets\(\{ acrossAllSheets: true \}\);/);
 });
