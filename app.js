@@ -82,6 +82,8 @@ let pointerMoved = false;
 const SHEET_GAP = 260;
 const SHEET_PART_ELEVATION = 2.4;
 const SHEET_PART_Z_CLAMP = 16;
+const DXF_SHEET_Z_FIGHT_BIAS_MIN = 0.03;
+const DXF_SHEET_Z_FIGHT_BIAS_MAX = 0.2;
 const SHEET_RING_MIN_RADIUS = 1800;
 const SHEET_RING_TRANSITION_MS = 420;
 const CAMERA_NEAR_MIN = 0.8;
@@ -1200,7 +1202,12 @@ function setPartZForSheet(part, sheet) {
 
   if (isDxfPart(part)) {
     const sheetThickness = Math.max(0.1, Number(sheet.thickness || DEFAULT_PART_THICKNESS));
-    part.position.z = Number(sheet.originZ || 0) - sheetThickness * 0.5;
+    const zBias = THREE.MathUtils.clamp(
+      sheetThickness * 0.01,
+      DXF_SHEET_Z_FIGHT_BIAS_MIN,
+      DXF_SHEET_Z_FIGHT_BIAS_MAX
+    );
+    part.position.z = Number(sheet.originZ || 0) - sheetThickness * 0.5 - zBias;
     return;
   }
 
@@ -1470,11 +1477,13 @@ function rebuildSheetsVisuals() {
     const centerY = Number(sheet.originY) + Number(sheet.height) * 0.5;
     const thickness = Math.max(0.8, Number(sheet.thickness || 1));
     const plateZ = Number(sheet.originZ || 0) - thickness * 0.5;
+    const fillOffset = Math.max(0.08, thickness * 0.04);
+    const fillZ = Number(sheet.originZ || 0) - thickness - fillOffset;
 
     const wrapper = new THREE.Group();
     wrapper.name = `sheet-${idx + 1}`;
 
-    const bodyGeo = new THREE.BoxGeometry(Number(sheet.width), Number(sheet.height), thickness);
+    const bodyGeo = new THREE.PlaneGeometry(Number(sheet.width), Number(sheet.height));
     const bodyMat = new THREE.MeshStandardMaterial({
       color: 0x19232f,
       roughness: 0.94,
@@ -1485,16 +1494,18 @@ function rebuildSheetsVisuals() {
       polygonOffset: true,
       polygonOffsetFactor: 1,
       polygonOffsetUnits: 1,
+      side: THREE.DoubleSide,
       emissive: 0x000000,
       emissiveIntensity: 0
     });
     const bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
-    bodyMesh.position.set(centerX, centerY, plateZ);
+    bodyMesh.position.set(centerX, centerY, fillZ);
     bodyMesh.userData.sheetIndex = idx;
     wrapper.add(bodyMesh);
 
+    const volumeGeo = new THREE.BoxGeometry(Number(sheet.width), Number(sheet.height), thickness);
     const thicknessEdges = createSheetVolumeEdges(
-      bodyGeo,
+      volumeGeo,
       isActive ? 0x38bdf8 : 0x475569
     );
     thicknessEdges.position.set(centerX, centerY, plateZ);
@@ -1701,7 +1712,6 @@ function deleteSheetAt(index) {
 
   rebuildSheetsVisuals();
   updateGlobalBounds();
-  updatePieceCountBadge();
   updateSheetListUi();
   updateSheetInfoBadge();
   return true;
@@ -1877,7 +1887,6 @@ window.addEventListener("keydown", (event) => {
   if (!part) return;
   removePartFromScene(part);
   updateGlobalBounds();
-  updatePieceCountBadge();
   updateSheetListUi();
   updateSheetInfoBadge();
 });
@@ -3951,7 +3960,10 @@ function makeExtrudedMeshFromShape(shape, thickness, material) {
   });
 
   geo.translate(0, 0, -thickness / 2);
-  geo.computeVertexNormals();
+  // ExtrudeGeometry already builds hard normals for caps/sides.
+  // Recomputing smooth normals here creates angle/zoom banding artifacts
+  // on large flat DXF faces and costs extra CPU during import.
+  if (!geo.getAttribute("normal")) geo.computeVertexNormals();
 
   return new THREE.Mesh(geo, material);
 }
@@ -4036,7 +4048,6 @@ function finalizeImportedGroup(
   } else {
     updateGlobalBounds();
   }
-  updatePieceCountBadge();
   updateSheetListUi();
   updateSheetInfoBadge();
   return placed || !strictPlacement;
@@ -4395,7 +4406,6 @@ const fileInput = document.getElementById("fileInput");
 const stepInput = document.getElementById("stepInput");
 const fitBtn = document.getElementById("fitBtn");
 const clearBtn = document.getElementById("clearBtn");
-const pieceCountEl = document.getElementById("pieceCount");
 const batchTimeEl = document.getElementById("batchTime");
 const runtimeModeEl = document.getElementById("runtimeMode");
 const cacheStatsEl = document.getElementById("cacheStats");
@@ -4437,11 +4447,6 @@ function updateFpsBadgeText(fps = 0) {
   if (!fpsBadgeEl) return;
   const value = Number.isFinite(fps) ? Math.max(0, Math.round(fps)) : 0;
   fpsBadgeEl.textContent = `FPS: ${value}`;
-}
-
-function updatePieceCountBadge() {
-  if (!pieceCountEl) return;
-  pieceCountEl.textContent = `Pecas: ${partsGroup.children.length}`;
 }
 
 function updateBatchTimeBadge(ms) {
@@ -5235,10 +5240,9 @@ function updateSheetInfoBadge() {
     return;
   }
   const sheet = sheetState[sheetIndex];
-  const pieces = piecesInSheet(sheetIndex);
   sheetInfoEl.textContent =
     `Chapa ${sheetIndex + 1}: ${sheet.width.toFixed(0)} x ${sheet.height.toFixed(0)} mm | ` +
-    `Esp: ${sheet.spacing.toFixed(1)} | Pecas: ${pieces}`;
+    `Esp: ${sheet.spacing.toFixed(1)}`;
 }
 
 function updateSheetListUi() {
@@ -5383,7 +5387,6 @@ window.addEventListener("keydown", (event) => {
   }
 });
 
-updatePieceCountBadge();
 updateBatchTimeBadge(0);
 updateCacheStatsBadge(null);
 updateSelectedPieceBadge(null);
@@ -6175,7 +6178,6 @@ async function mountInventoryToSheets({ acrossAllSheets = false } = {}) {
     pruneEmptyInventoryItems();
     updateInventoryListUi();
     updateGlobalBounds();
-    updatePieceCountBadge();
     updateSheetListUi();
     updateSheetInfoBadge();
     updateBatchTimeBadge(performance.now() - mountStart);
@@ -6335,7 +6337,6 @@ clearBtn.addEventListener("click", () => {
   disposeInactiveProxyInstancedMesh();
   inactiveProxyDirty = false;
   updateGlobalBounds();
-  updatePieceCountBadge();
   updateSheetListUi();
   updateSheetInfoBadge();
   updateInventoryListUi();

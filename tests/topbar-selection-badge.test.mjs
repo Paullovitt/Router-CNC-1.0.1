@@ -16,6 +16,7 @@ test("topbar nao exibe badges de render/cache e mantem badge da peca selecionada
   const html = readProjectFile("index.html");
   assert.doesNotMatch(html, /id="runtimeMode"/);
   assert.doesNotMatch(html, /id="cacheStats"/);
+  assert.doesNotMatch(html, /id="pieceCount"/);
   assert.match(html, /id="selectedPiece"/);
 });
 

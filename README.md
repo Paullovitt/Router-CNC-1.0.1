@@ -17,6 +17,9 @@ Permitir importacao e visualizacao 3D de pecas DXF/STEP com um fluxo de producao
 - painel direito de `Pecas importadas` com busca por codigo e filtro por tipo (`.DXF` / `.STEP`)
 - cards de pecas com miniatura lazy em WebP e DOM virtualizado em grid (renderiza so o trecho visivel)
 - miniatura DXF com simplificacao adaptativa de contorno (evita distorcao em pecas com muitos pontos)
+- topbar simplificada sem os badges separados de total de pecas
+- offset Z minimo para DXF na chapa para reduzir z-fighting em angulos/zoom extremos
+- correção de artefato visual em DXF: preservacao dos hard normals da extrusao (sem suavizacao indevida), reduzindo manchas/borrado em zoom/angulo e com menor custo de CPU no import
 - miniaturas com paleta de cores variada por peca (deterministica), evitando repeticao visual
 - campo `Qtd` por item no estoque (Enter confirma, `0` remove o item)
 - botoes de montagem:
