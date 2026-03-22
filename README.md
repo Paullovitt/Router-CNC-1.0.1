@@ -20,8 +20,10 @@ Permitir um fluxo de trabalho orientado a chapas CNC:
 - miniatura DXF com simplificacao adaptativa de contorno
 - botao `Mover para chapa` removido da topbar
 - botao `Editar corte` na topbar com modal central e arrastavel
+- botao `Simular corte` na topbar ao lado de `Editar corte`
 - biblioteca de ferramentas com presets, cadastro customizado, edicao e exclusao
 - setas de inicio de corte na chapa ativa para definir a origem visual do sequenciamento
+- atalho `F9` para alternar as pecas da chapa ativa em cinza (melhor visualizacao da ferramenta no corte)
 - simulacao 3D da ferramenta seguindo o caminho de corte no viewport
 - exportacao `.NC` por API local e `Ctrl+S` salvando projeto `.CNC3D`
 - topbar simplificada sem os badges antigos de render/cache
@@ -104,9 +106,11 @@ Abra:
 5. Use `Nova chapa` para criar outra chapa.
 6. Clique em uma chapa no painel lateral para ativar.
 7. Use `Editar chapa` para ajustar largura, altura, margens e espacamento.
-8. Use `Editar corte` para escolher ferramenta, ajustar parametros, simular e exportar `.NC`.
-9. Use `Ctrl+S` para salvar o projeto atual em `.CNC3D`.
-10. Clique em `Enquadrar (Fit)` para centralizar a visualizacao.
+8. Use `Editar corte` para escolher ferramenta, ajustar parametros e exportar `.NC`.
+9. Use `Simular corte` na topbar para rodar a simulacao da ferramenta no caminho gerado.
+10. Pressione `F9` para alternar as pecas da chapa ativa em cinza durante a simulacao.
+11. Use `Ctrl+S` para salvar o projeto atual em `.CNC3D`.
+12. Clique em `Enquadrar (Fit)` para centralizar a visualizacao.
 
 ## Principais funcoes
 

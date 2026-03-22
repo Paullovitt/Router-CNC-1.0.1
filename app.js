@@ -227,6 +227,10 @@ const simState = {
   cutPlan: null
 };
 
+const graySheetViewState = {
+  enabled: false
+};
+
 function createDxfWorkerPool(workerCount) {
   if (typeof Worker === "undefined") return null;
   const count = Math.max(1, Number(workerCount || 1));
@@ -2165,6 +2169,7 @@ function setActiveSheet(index, { animate = false } = {}) {
     startSheetRingTransition();
     updateSheetListUi();
     updateSheetInfoBadge();
+    updateActiveSheetGrayMode();
     if (cutEditModalEl && !cutEditModalEl.classList.contains("hidden")) syncCutEditorWithActiveSheet();
     return;
   }
@@ -2172,8 +2177,79 @@ function setActiveSheet(index, { animate = false } = {}) {
   rebuildSheetsVisuals();
   updateSheetListUi();
   updateSheetInfoBadge();
+  updateActiveSheetGrayMode();
   if (cutEditModalEl && !cutEditModalEl.classList.contains("hidden")) syncCutEditorWithActiveSheet();
   updateGlobalBounds();
+}
+
+function createGrayscaleMaterialClone(sourceMaterial) {
+  if (!sourceMaterial || typeof sourceMaterial.clone !== "function") return sourceMaterial;
+  const clone = sourceMaterial.clone();
+  if (clone.color && typeof clone.color.setHex === "function") clone.color.setHex(0x9ca3af);
+  if (clone.emissive && typeof clone.emissive.setHex === "function") clone.emissive.setHex(0x000000);
+  if (typeof clone.metalness === "number") clone.metalness = Math.max(0, clone.metalness * 0.25);
+  if (typeof clone.roughness === "number") clone.roughness = Math.min(1, Math.max(clone.roughness, 0.78));
+  if (typeof clone.opacity === "number") clone.opacity = Math.min(clone.opacity, 0.95);
+  clone.needsUpdate = true;
+  return clone;
+}
+
+function disposeMaterialClone(material) {
+  if (!material) return;
+  if (Array.isArray(material)) {
+    for (const entry of material) {
+      if (entry && typeof entry.dispose === "function") entry.dispose();
+    }
+    return;
+  }
+  if (typeof material.dispose === "function") material.dispose();
+}
+
+function applyGrayMaterialOverride(part) {
+  if (!part || !part.isObject3D) return;
+  part.traverse((node) => {
+    if (!node?.isMesh || !node.material) return;
+    if (node.userData?.grayOriginalMaterial) return;
+    const originalMaterial = node.material;
+    const grayMaterial = Array.isArray(originalMaterial)
+      ? originalMaterial.map((entry) => createGrayscaleMaterialClone(entry))
+      : createGrayscaleMaterialClone(originalMaterial);
+    if (!node.userData || typeof node.userData !== "object") node.userData = {};
+    node.userData.grayOriginalMaterial = originalMaterial;
+    node.userData.grayOverrideMaterial = grayMaterial;
+    node.material = grayMaterial;
+  });
+}
+
+function restoreGrayMaterialOverride(part) {
+  if (!part || !part.isObject3D) return;
+  part.traverse((node) => {
+    if (!node?.isMesh || !node.userData?.grayOriginalMaterial) return;
+    const originalMaterial = node.userData.grayOriginalMaterial;
+    const grayMaterial = node.userData.grayOverrideMaterial || null;
+    node.material = originalMaterial;
+    delete node.userData.grayOriginalMaterial;
+    delete node.userData.grayOverrideMaterial;
+    disposeMaterialClone(grayMaterial);
+  });
+}
+
+function updateActiveSheetGrayMode() {
+  for (const part of partsGroup.children) {
+    const sheetIdx = getValidSheetIndex(part?.userData?.sheetIndex);
+    const shouldGray = graySheetViewState.enabled && sheetIdx === activeSheetIndex;
+    if (shouldGray) applyGrayMaterialOverride(part);
+    else restoreGrayMaterialOverride(part);
+  }
+}
+
+function setActiveSheetGrayMode(enabled) {
+  graySheetViewState.enabled = !!enabled;
+  updateActiveSheetGrayMode();
+}
+
+function toggleActiveSheetGrayMode() {
+  setActiveSheetGrayMode(!graySheetViewState.enabled);
 }
 
 function onResize() {
@@ -2219,6 +2295,7 @@ function disposeObject3D(root) {
 function removePartFromScene(part) {
   if (!part) return false;
   if (selectedPart === part) clearSelection();
+  restoreGrayMaterialOverride(part);
   partsGroup.remove(part);
   disposeObject3D(part);
   inactiveProxyDirty = true;
@@ -2246,6 +2323,7 @@ function deleteSheetAt(index) {
   }
 
   for (const part of toRemove) {
+    restoreGrayMaterialOverride(part);
     partsGroup.remove(part);
     disposeObject3D(part);
   }
@@ -2261,6 +2339,7 @@ function deleteSheetAt(index) {
   }
 
   rebuildSheetsVisuals();
+  updateActiveSheetGrayMode();
   updateGlobalBounds();
   updateSheetListUi();
   updateSheetInfoBadge();
@@ -5476,6 +5555,7 @@ function finalizeImportedGroup(
   } else {
     updateGlobalBounds();
   }
+  updateActiveSheetGrayMode();
   updateSheetListUi();
   updateSheetInfoBadge();
   return placed || !strictPlacement;
@@ -7262,6 +7342,13 @@ if (applyAllSheetsBtn) {
 }
 
 window.addEventListener("keydown", (event) => {
+  const keyLower = String(event.key || "").toLowerCase();
+  if (keyLower === "f9") {
+    event.preventDefault();
+    toggleActiveSheetGrayMode();
+    return;
+  }
+
   if ((event.ctrlKey || event.metaKey) && String(event.key || "").toLowerCase() === "s") {
     event.preventDefault();
     saveProjectFile().catch((error) => {
@@ -8090,6 +8177,7 @@ async function mountInventoryToSheets({ acrossAllSheets = false } = {}) {
     }
   } finally {
     pruneEmptyInventoryItems();
+    updateActiveSheetGrayMode();
     updateInventoryListUi();
     updateGlobalBounds();
     updateSheetListUi();
@@ -8237,6 +8325,7 @@ fitBtn.addEventListener("click", () => {
 });
 
 clearBtn.addEventListener("click", () => {
+  setActiveSheetGrayMode(false);
   clearSelection();
   stopCutSimulation({ keepModal: false });
   while (partsGroup.children.length) {
@@ -8258,6 +8347,7 @@ clearBtn.addEventListener("click", () => {
 });
 
 window.addEventListener("beforeunload", () => {
+  setActiveSheetGrayMode(false);
   stopCutSimulation({ keepModal: true });
   disposeAllInventoryTemplateGroups();
   disposeInactiveProxyInstancedMesh();

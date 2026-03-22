@@ -32,6 +32,7 @@
       <button id="newSheetBtn" type="button" class="btn secondary">Nova chapa</button>
       <button id="editSheetBtn" type="button" class="btn secondary">Editar chapa</button>
       <button id="editCutBtn" type="button" class="btn secondary">Editar corte</button>
+      <button id="simulateCutBtn" type="button" class="btn secondary">Simular corte</button>
       <span id="sheetInfo" class="counter">Chapa: -</span>
       <span id="batchTime" class="counter">Tempo: 0 ms</span>
       <span id="selectedPiece" class="counter">Peca sel.: -</span>
@@ -74,7 +75,7 @@
   </div>
 
   <div id="help">
-    Mouse: <b>Esq</b> orbitar | <b>Meio</b> zoom | <b>Dir</b> pan | <b>Delete</b> remove peca selecionada ou chapa ativa no painel
+    Mouse: <b>Esq</b> orbitar | <b>Meio</b> zoom | <b>Dir</b> pan | <b>Delete</b> remove peca selecionada ou chapa ativa no painel | <b>F9</b> alterna pecas da chapa ativa em cinza
   </div>
 
   <div id="sheetEditModal" class="modal hidden">
@@ -190,7 +191,6 @@
       <div class="modal-actions">
         <button id="cutApplyAllBtn" type="button" class="btn secondary">Aplicar em todas</button>
         <button id="cutApplyCurrentBtn" type="button" class="btn secondary">Aplicar atual</button>
-        <button id="simulateCutBtn" type="button" class="btn secondary">Simular corte</button>
         <button id="exportNcBtn" type="button" class="btn">Exportar .NC</button>
         <button id="closeCutModalBtn" type="button" class="btn">Fechar</button>
       </div>

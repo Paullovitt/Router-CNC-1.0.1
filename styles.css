@@ -479,10 +479,9 @@ select {
 
 .sim-modal {
   position: fixed;
-  left: 50%;
-  top: 84px;
-  transform: translateX(-50%);
+  inset: 0;
   z-index: 72;
+  pointer-events: none;
 }
 
 .sim-modal.hidden {
@@ -490,6 +489,11 @@ select {
 }
 
 .sim-card {
+  position: fixed;
+  left: 50%;
+  top: 84px;
+  transform: translateX(-50%);
+  pointer-events: auto;
   min-width: 560px;
   max-width: calc(100vw - 24px);
   border: 1px solid var(--line);

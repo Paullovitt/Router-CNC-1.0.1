@@ -15,7 +15,9 @@ function readProjectFile(relativePath) {
 test("topbar e html contem editor e simulacao de corte", () => {
   const html = readProjectFile("index.html");
   assert.match(html, /id="editCutBtn"/);
+  assert.match(html, /id="editCutBtn"[\s\S]*id="simulateCutBtn"/);
   assert.match(html, /Editar corte/);
+  assert.doesNotMatch(html, /id="cutEditModal"[\s\S]*id="simulateCutBtn"/);
   assert.match(html, /id="cutEditModal"/);
   assert.match(html, /id="simCutModal"/);
   assert.match(html, /id="exportNcBtn"/);
@@ -30,6 +32,8 @@ test("app.js registra estado, atalhos e simulacao do editor de corte", () => {
   assert.match(appJs, /function saveProjectFile\(baseName = "", silent = false\)/);
   assert.match(appJs, /function exportCutPlansToNc\(\)/);
   assert.match(appJs, /if \(editCutBtn\) \{\s*editCutBtn\.addEventListener\("click", \(\) => openCutEditorModal\(\)\);/);
+  assert.match(appJs, /if \(simulateCutBtn\) \{\s*simulateCutBtn\.addEventListener\("click", \(\) =>/);
+  assert.match(appJs, /if \(keyLower === "f9"\) \{\s*event\.preventDefault\(\);\s*toggleActiveSheetGrayMode\(\);/);
   assert.match(appJs, /if \(\(event\.ctrlKey \|\| event\.metaKey\) && String\(event\.key \|\| ""\)\.toLowerCase\(\) === "s"\)/);
   assert.match(appJs, /updateCutSimulation\(now\);/);
 });
