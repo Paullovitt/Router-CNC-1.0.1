@@ -1988,17 +1988,15 @@ function createSheetStartArrow(point, sheetIndex, isSelected) {
   const color = isSelected ? 0x38bdf8 : 0xe5eef9;
   const dir = new THREE.Vector2(Number(point.dx || 0), Number(point.dy || 0)).normalize();
   const normal = new THREE.Vector2(-dir.y, dir.x);
-  const shaftLen = 48;
-  const headLen = 20;
-  const halfWidth = 7;
-
-  const base = new THREE.Vector3(point.x, point.y, 0);
-  const tip = new THREE.Vector3(point.x + dir.x * shaftLen, point.y + dir.y * shaftLen, 0);
-  const headBase = new THREE.Vector3(
-    tip.x - dir.x * headLen,
-    tip.y - dir.y * headLen,
-    0
+  const isCornerMarker = ["top_left", "top_right", "bottom_right", "bottom_left"].includes(
+    String(point.corner || "")
   );
+  const markerScale = isCornerMarker ? 2 : 1;
+  const headLen = 22 * markerScale;
+  const halfWidth = 12 * markerScale;
+
+  const tip = new THREE.Vector3(point.x + dir.x * headLen, point.y + dir.y * headLen, 0);
+  const headBase = new THREE.Vector3(point.x, point.y, 0);
   const left = new THREE.Vector3(
     headBase.x + normal.x * halfWidth,
     headBase.y + normal.y * halfWidth,
@@ -2009,17 +2007,6 @@ function createSheetStartArrow(point, sheetIndex, isSelected) {
     headBase.y - normal.y * halfWidth,
     0
   );
-
-  const shaftGeometry = new THREE.BufferGeometry().setFromPoints([base, headBase]);
-  const shaftMaterial = new THREE.LineBasicMaterial({
-    color,
-    transparent: true,
-    opacity: isSelected ? 1 : 0.86,
-    toneMapped: false
-  });
-  const shaft = new THREE.Line(shaftGeometry, shaftMaterial);
-  shaft.raycast = () => {};
-  group.add(shaft);
 
   const triangleGeometry = new THREE.BufferGeometry();
   triangleGeometry.setAttribute("position", new THREE.Float32BufferAttribute([
@@ -2042,6 +2029,19 @@ function createSheetStartArrow(point, sheetIndex, isSelected) {
   group.userData.cutStartCorner = point.corner;
   cutState.arrowsPickTargets.push(head);
   group.add(head);
+
+  const outlineGeometry = new THREE.BufferGeometry().setFromPoints([
+    tip, left, right, tip
+  ]);
+  const outlineMaterial = new THREE.LineBasicMaterial({
+    color: isSelected ? 0x7dd3fc : 0xffffff,
+    transparent: true,
+    opacity: isSelected ? 0.95 : 0.78,
+    toneMapped: false
+  });
+  const outline = new THREE.Line(outlineGeometry, outlineMaterial);
+  outline.raycast = () => {};
+  group.add(outline);
   return group;
 }
 
@@ -7401,7 +7401,6 @@ if (applySheetBtn) {
     updateGlobalBounds();
     updateSheetListUi();
     updateSheetInfoBadge();
-    fitToScene(1.15);
   });
 }
 
@@ -7485,7 +7484,6 @@ if (applyAllSheetsBtn) {
     updateGlobalBounds();
     updateSheetListUi();
     updateSheetInfoBadge();
-    fitToScene(1.15);
   });
 }
 

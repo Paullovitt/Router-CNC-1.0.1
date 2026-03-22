@@ -24,6 +24,7 @@ Permitir um fluxo de trabalho orientado a chapas CNC:
 - biblioteca de ferramentas com presets, cadastro customizado, edicao e exclusao
 - profundidade de corte automatica por espessura da chapa (passadas por faixa de espessura e profundidade final com sobrecorte)
 - setas de inicio de corte na chapa ativa para definir a origem visual do sequenciamento
+- marcadores de inicio de corte em formato triangular na chapa ativa
 - atalho `F9` para alternar as pecas da chapa ativa em cinza (melhor visualizacao da ferramenta no corte)
 - simulacao 3D da ferramenta seguindo o caminho de corte no viewport
 - exportacao `.NC` por API local e `Ctrl+S` salvando projeto `.CNC3D`
@@ -34,6 +35,7 @@ Permitir um fluxo de trabalho orientado a chapas CNC:
 - badge de FPS no viewport para monitorar performance
 - proxies instanciados em WebGL2 para pecas de chapas inativas
 - sincronizacao da espessura das pecas DXF com a espessura da chapa ativa
+- `Editar chapa` nao aplica mais enquadramento automatico de camera ao fechar/aplicar
 
 ## Arquitetura do sistema
 

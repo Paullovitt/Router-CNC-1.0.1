@@ -42,5 +42,7 @@ test("app.js cria setas de origem de corte na chapa ativa", () => {
   const appJs = readProjectFile("app.js");
   assert.match(appJs, /function buildSheetStartArrowPoints\(sheet\)/);
   assert.match(appJs, /function createSheetStartArrow\(point, sheetIndex, isSelected\)/);
+  assert.match(appJs, /const isCornerMarker = \["top_left", "top_right", "bottom_right", "bottom_left"\]\.includes\(/);
+  assert.match(appJs, /const markerScale = isCornerMarker \? 2 : 1;/);
   assert.match(appJs, /setSheetCutStartCorner\(sheetIndex, arrowHit\.userData\.cutStartCorner\);/);
 });

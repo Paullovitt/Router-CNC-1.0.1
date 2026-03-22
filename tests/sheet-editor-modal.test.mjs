@@ -31,3 +31,11 @@ test("novas chapas usam o template global em vez de copiar da chapa ativa", () =
   assert.match(appJs, /if \(newSheetBtn\)\s*\{\s*newSheetBtn\.addEventListener\("click", \(\) => \{\s*sheetState\.push\(createSheetFrom\(\)\);/);
   assert.match(appJs, /if \(allowCreateSheet\)\s*\{\s*sheetState\.push\(createSheetFrom\(\)\);/);
 });
+
+test("aplicar no editar chapa nao dispara fit automatico da camera", () => {
+  const appJs = readProjectFile("app.js");
+  const applyCurrentBlock = appJs.match(/if \(applySheetBtn\)\s*\{[\s\S]*?\n\}/)?.[0] || "";
+  const applyAllBlock = appJs.match(/if \(applyAllSheetsBtn\)\s*\{[\s\S]*?\n\}/)?.[0] || "";
+  assert.doesNotMatch(applyCurrentBlock, /fitToScene\(/);
+  assert.doesNotMatch(applyAllBlock, /fitToScene\(/);
+});
