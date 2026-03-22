@@ -147,6 +147,9 @@ let inactiveProxyDirty = true;
 let projectFileName = "";
 
 const CUT_STORAGE_KEY = "router-cnc-cut-v1";
+const CUT_AUTO_PASS_THICKNESS_MM = 5;
+const CUT_AUTO_BREAKTHROUGH_MM = 0.1;
+const CUT_MAX_PASS_COUNT = 999;
 const CUT_TOOL_TYPES = [
   { key: "straight", label: "Fresa reta", measures: [3, 4, 6, 8, 12] },
   { key: "endmill", label: "Fresa de topo", measures: [2, 3, 4, 6, 8, 10] },
@@ -1020,6 +1023,66 @@ function sanitizePositive(value, fallback, min = 0.0001, max = Infinity) {
   return THREE.MathUtils.clamp(numeric, min, max);
 }
 
+function sanitizeInteger(value, fallback, min = 1, max = CUT_MAX_PASS_COUNT) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return Math.round(sanitizePositive(fallback, min, min, max));
+  return Math.round(THREE.MathUtils.clamp(numeric, min, max));
+}
+
+function getSheetThicknessForCut(sheet) {
+  const rawThickness = Number(sheet?.thickness);
+  if (!Number.isFinite(rawThickness)) return DEFAULT_PART_THICKNESS;
+  return Math.max(0.1, rawThickness);
+}
+
+function getToolMaxStepDownForAutoDepth(toolType, toolMeasure) {
+  const mm = Math.max(0.1, Number(toolMeasure || 0));
+  const type = String(toolType || "straight").toLowerCase();
+  switch (type) {
+    case "drill":
+      return Math.max(0.8, Math.min(mm * 0.8, 4.2));
+    case "ballnose":
+      return Math.max(0.4, Math.min(mm * 0.34, 2.4));
+    case "vbit":
+      return Math.max(0.4, Math.min(mm * 0.12, 1.8));
+    case "surfacing":
+      return Math.max(0.7, Math.min(mm * 0.2, 2.6));
+    default:
+      return Math.max(0.8, Math.min(mm * 0.9, 6.2));
+  }
+}
+
+function buildAutoCutDepthProfile(sheetThickness, toolType, toolMeasure, requestedPassCount = null) {
+  const thickness = Math.max(0.1, Number(sheetThickness || DEFAULT_PART_THICKNESS));
+  const finalDepth = Number((thickness + CUT_AUTO_BREAKTHROUGH_MM).toFixed(3));
+  const basePassCount = Math.max(1, Math.ceil(thickness / CUT_AUTO_PASS_THICKNESS_MM));
+  const toolStepDownCap = Math.max(0.1, getToolMaxStepDownForAutoDepth(toolType, toolMeasure));
+  const toolPassCount = Math.max(1, Math.ceil(finalDepth / toolStepDownCap));
+  const autoPassCount = Math.max(basePassCount, toolPassCount);
+  const explicitPassCount = Number.isFinite(Number(requestedPassCount))
+    ? sanitizeInteger(requestedPassCount, autoPassCount, 1, CUT_MAX_PASS_COUNT)
+    : null;
+  const passCount = explicitPassCount || autoPassCount;
+  const stepDown = Number((finalDepth / passCount).toFixed(3));
+  return { stepDown, finalDepth, passCount };
+}
+
+function applyAutoDepthProfileToCutConfig(rawConfig, sheet) {
+  const normalized = cloneCutConfig(rawConfig);
+  const profile = buildAutoCutDepthProfile(
+    getSheetThicknessForCut(sheet),
+    normalized.toolType,
+    normalized.toolMeasure,
+    normalized.passCount
+  );
+  return {
+    ...normalized,
+    passCount: sanitizeInteger(profile.passCount, normalized.passCount, 1, CUT_MAX_PASS_COUNT),
+    stepDown: sanitizePositive(profile.stepDown, normalized.stepDown, 0.1, 1000),
+    finalDepth: sanitizePositive(profile.finalDepth, normalized.finalDepth, 0.1, 1000)
+  };
+}
+
 function buildToolPresetDefaults(typeKey, measure) {
   const mm = Math.max(0.1, Number(measure || 0));
   const type = String(typeKey || "straight").toLowerCase();
@@ -1169,6 +1232,9 @@ function cloneCutConfig(rawConfig) {
   const toolType = String(rawConfig?.toolType || "straight");
   const toolMeasure = Number(rawConfig?.toolMeasure || 6);
   const defaults = buildToolPresetDefaults(toolType, toolMeasure);
+  const normalizedStepDown = sanitizePositive(rawConfig?.stepDown, defaults.stepDown, 0.1, 1000);
+  const normalizedFinalDepth = sanitizePositive(rawConfig?.finalDepth, rawConfig?.finalDepth || DEFAULT_PART_THICKNESS, 0.1, 1000);
+  const inferredPassCount = Math.max(1, Math.ceil(normalizedFinalDepth / Math.max(0.1, normalizedStepDown)));
   return {
     toolId: String(rawConfig?.toolId || buildCutToolId("straight", 6)),
     toolType,
@@ -1179,8 +1245,9 @@ function cloneCutConfig(rawConfig) {
     rpm: sanitizePositive(rawConfig?.rpm, defaults.rpm, 100, 40000),
     feed: sanitizePositive(rawConfig?.feed, defaults.feed, 10, 40000),
     plunge: sanitizePositive(rawConfig?.plunge, defaults.plunge, 10, 20000),
-    stepDown: sanitizePositive(rawConfig?.stepDown, defaults.stepDown, 0.1, 1000),
-    finalDepth: sanitizePositive(rawConfig?.finalDepth, rawConfig?.finalDepth || DEFAULT_PART_THICKNESS, 0.1, 1000),
+    passCount: sanitizeInteger(rawConfig?.passCount, inferredPassCount, 1, CUT_MAX_PASS_COUNT),
+    stepDown: normalizedStepDown,
+    finalDepth: normalizedFinalDepth,
     stepOver: sanitizePositive(rawConfig?.stepOver, defaults.stepOver, 1, 100),
     safeZ: sanitizePositive(rawConfig?.safeZ, defaults.safeZ, 0.1, 1000),
     startX: Number.isFinite(Number(rawConfig?.startX)) ? Number(rawConfig.startX) : 0,
@@ -1208,6 +1275,7 @@ function getDefaultSheetCutConfig() {
     rpm: tool.rpm,
     feed: tool.feed,
     plunge: tool.plunge,
+    passCount: 1,
     stepDown: tool.stepDown,
     finalDepth: tool.finalDepth,
     stepOver: tool.stepOver,
@@ -1226,7 +1294,10 @@ function normalizeCutStartCorner(value) {
 
 function ensureSheetCutState(sheet) {
   if (!sheet || typeof sheet !== "object") return null;
-  sheet.cutSettings = cloneCutConfig(sheet.cutSettings || getDefaultSheetCutConfig());
+  sheet.cutSettings = applyAutoDepthProfileToCutConfig(
+    sheet.cutSettings || getDefaultSheetCutConfig(),
+    sheet
+  );
   sheet.cutStartCorner = normalizeCutStartCorner(sheet.cutStartCorner);
   return sheet;
 }
@@ -1235,7 +1306,9 @@ function getSheetCutConfig(sheetIndex = activeSheetIndex) {
   const idx = getValidSheetIndex(sheetIndex);
   if (idx < 0) return cloneCutConfig(getDefaultSheetCutConfig());
   const sheet = ensureSheetCutState(sheetState[idx]);
-  return cloneCutConfig(sheet?.cutSettings || getDefaultSheetCutConfig());
+  const normalized = applyAutoDepthProfileToCutConfig(sheet?.cutSettings || getDefaultSheetCutConfig(), sheet);
+  if (sheet) sheet.cutSettings = cloneCutConfig(normalized);
+  return normalized;
 }
 
 function setSheetCutConfig(sheetIndex, nextConfig) {
@@ -1243,7 +1316,7 @@ function setSheetCutConfig(sheetIndex, nextConfig) {
   if (idx < 0) return false;
   const sheet = ensureSheetCutState(sheetState[idx]);
   if (!sheet) return false;
-  sheet.cutSettings = cloneCutConfig(nextConfig);
+  sheet.cutSettings = applyAutoDepthProfileToCutConfig(nextConfig, sheet);
   cutState.planCache.delete(idx);
   return true;
 }
@@ -2933,11 +3006,24 @@ function buildCutSegments(plan, sheet, cutConfig) {
   for (const job of plan.jobs) {
     if (!Array.isArray(job.points) || job.points.length < 2) continue;
     const firstPoint = job.points[0];
-    const finalDepth = -Math.max(0.1, Number(cutConfig.finalDepth || DEFAULT_PART_THICKNESS));
-    const stepDown = Math.max(0.1, Number(cutConfig.stepDown || 1));
+    const finalDepthAbs = Math.max(0.1, Number(cutConfig.finalDepth || DEFAULT_PART_THICKNESS));
+    const finalDepth = -finalDepthAbs;
+    const passCount = sanitizeInteger(
+      cutConfig.passCount,
+      Math.max(1, Math.ceil(finalDepthAbs / Math.max(0.1, Number(cutConfig.stepDown || 1)))),
+      1,
+      CUT_MAX_PASS_COUNT
+    );
+    const stepDown = finalDepthAbs / passCount;
     const passDepths = [];
-    for (let depth = -stepDown; depth > finalDepth; depth -= stepDown) passDepths.push(depth);
-    passDepths.push(finalDepth);
+    for (let passIndex = 1; passIndex <= passCount; passIndex += 1) {
+      if (passIndex === passCount) {
+        passDepths.push(finalDepth);
+        continue;
+      }
+      const depth = -Number((stepDown * passIndex).toFixed(6));
+      passDepths.push(Math.max(depth, finalDepth));
+    }
 
     const rapidTarget = new THREE.Vector3(firstPoint.x, firstPoint.y, safeZ);
     segments.push(buildSegment(currentPoint, rapidTarget, rapidSpeed, "rapid"));
@@ -6059,14 +6145,46 @@ function getCutToolFromForm() {
   return getCutToolById(selectedToolId);
 }
 
+function getRequestedCutPassCount(fallback = null) {
+  if (!cutStepDownInputEl) return fallback;
+  const raw = Number(cutStepDownInputEl.value);
+  if (!Number.isFinite(raw)) return fallback;
+  const safeFallback = Number.isFinite(Number(fallback)) ? Number(fallback) : 1;
+  return sanitizeInteger(raw, safeFallback, 1, CUT_MAX_PASS_COUNT);
+}
+
+function syncCutDepthInputsForSheet(toolLike = null, sheetIndex = activeSheetIndex, requestedPassCount = null) {
+  const idx = getValidSheetIndex(sheetIndex);
+  const sheet = idx >= 0 ? sheetState[idx] : null;
+  const toolType = String(
+    toolLike?.typeKey ||
+    cutToolTypeSelectEl?.value ||
+    cutState.selectedToolType ||
+    "straight"
+  );
+  const toolMeasure = Number(
+    toolLike?.measure ||
+    cutToolMeasureSelectEl?.value ||
+    cutState.selectedToolMeasure ||
+    6
+  );
+  const fallbackPassCount = Number.isFinite(Number(toolLike?.passCount)) ? Number(toolLike.passCount) : 1;
+  const nextPassCount = Number.isFinite(Number(requestedPassCount))
+    ? Number(requestedPassCount)
+    : getRequestedCutPassCount(fallbackPassCount);
+  const profile = buildAutoCutDepthProfile(getSheetThicknessForCut(sheet), toolType, toolMeasure, nextPassCount);
+  if (cutStepDownInputEl) cutStepDownInputEl.value = String(profile.passCount);
+  if (cutFinalDepthInputEl) cutFinalDepthInputEl.value = String(profile.finalDepth);
+  return profile;
+}
+
 function fillCutFieldsFromTool(tool) {
   if (!tool) return;
   if (cutToolNameInputEl) cutToolNameInputEl.value = String(tool.name || "");
   if (cutRpmInputEl) cutRpmInputEl.value = String(tool.rpm);
   if (cutFeedInputEl) cutFeedInputEl.value = String(tool.feed);
   if (cutPlungeInputEl) cutPlungeInputEl.value = String(tool.plunge);
-  if (cutStepDownInputEl) cutStepDownInputEl.value = String(tool.stepDown);
-  if (cutFinalDepthInputEl) cutFinalDepthInputEl.value = String(tool.finalDepth);
+  syncCutDepthInputsForSheet(tool);
   if (cutStepOverInputEl) cutStepOverInputEl.value = String(tool.stepOver);
   if (cutSafeZInputEl) cutSafeZInputEl.value = String(tool.safeZ);
   if (cutEntryTypeSelectEl) cutEntryTypeSelectEl.value = String(tool.entryType || "ramp");
@@ -6075,16 +6193,18 @@ function fillCutFieldsFromTool(tool) {
 function readCutToolFromForm() {
   const type = findCutToolType(cutToolTypeSelectEl?.value || cutState.selectedToolType);
   const measure = Number(cutToolMeasureSelectEl?.value || cutState.selectedToolMeasure || type.measures[0] || 6);
+  const currentTool = getCutToolFromForm();
+  const defaults = buildToolPresetDefaults(type.key, measure);
   return normalizeCutToolPreset({
-    id: getCutToolFromForm()?.id || buildCutToolId(type.key, measure),
+    id: currentTool?.id || buildCutToolId(type.key, measure),
     typeKey: type.key,
     measure,
     name: String(cutToolNameInputEl?.value || buildCutToolName(type.key, measure)).trim(),
     rpm: Number(cutRpmInputEl?.value),
     feed: Number(cutFeedInputEl?.value),
     plunge: Number(cutPlungeInputEl?.value),
-    stepDown: Number(cutStepDownInputEl?.value),
-    finalDepth: Number(cutFinalDepthInputEl?.value),
+    stepDown: Number(currentTool?.stepDown || defaults.stepDown),
+    finalDepth: Number(currentTool?.finalDepth || defaults.finalDepth),
     stepOver: Number(cutStepOverInputEl?.value),
     safeZ: Number(cutSafeZInputEl?.value),
     entryType: String(cutEntryTypeSelectEl?.value || "ramp")
@@ -6093,7 +6213,8 @@ function readCutToolFromForm() {
 
 function buildCutConfigFromForm() {
   const tool = readCutToolFromForm();
-  return cloneCutConfig({
+  const requestedPassCount = getRequestedCutPassCount(1);
+  const baseConfig = cloneCutConfig({
     toolId: tool.id,
     toolType: tool.typeKey,
     toolMeasure: tool.measure,
@@ -6103,6 +6224,7 @@ function buildCutConfigFromForm() {
     rpm: tool.rpm,
     feed: tool.feed,
     plunge: tool.plunge,
+    passCount: sanitizeInteger(requestedPassCount, 1, 1, CUT_MAX_PASS_COUNT),
     stepDown: tool.stepDown,
     finalDepth: Number(cutFinalDepthInputEl?.value || tool.finalDepth),
     stepOver: Number(cutStepOverInputEl?.value || tool.stepOver),
@@ -6111,10 +6233,18 @@ function buildCutConfigFromForm() {
     startY: Number(cutStartYInputEl?.value || 0),
     entryType: String(cutEntryTypeSelectEl?.value || tool.entryType || "ramp")
   });
+  const sheetIndex = getValidSheetIndex(activeSheetIndex);
+  const sheet = sheetIndex >= 0 ? sheetState[sheetIndex] : null;
+  const normalized = applyAutoDepthProfileToCutConfig(baseConfig, sheet);
+  if (cutStepDownInputEl) cutStepDownInputEl.value = String(normalized.passCount);
+  if (cutFinalDepthInputEl) cutFinalDepthInputEl.value = String(normalized.finalDepth);
+  return normalized;
 }
 
 function fillCutEditorForm(config) {
-  const normalized = cloneCutConfig(config);
+  const sheetIndex = getValidSheetIndex(activeSheetIndex);
+  const sheet = sheetIndex >= 0 ? sheetState[sheetIndex] : null;
+  const normalized = applyAutoDepthProfileToCutConfig(config, sheet);
   const type = findCutToolType(normalized.toolType);
   cutState.selectedToolType = type.key;
   cutState.selectedToolMeasure = Number(normalized.toolMeasure || type.measures[0] || 6);
@@ -6140,7 +6270,7 @@ function fillCutEditorForm(config) {
   if (cutRpmInputEl) cutRpmInputEl.value = String(normalized.rpm);
   if (cutFeedInputEl) cutFeedInputEl.value = String(normalized.feed);
   if (cutPlungeInputEl) cutPlungeInputEl.value = String(normalized.plunge);
-  if (cutStepDownInputEl) cutStepDownInputEl.value = String(normalized.stepDown);
+  if (cutStepDownInputEl) cutStepDownInputEl.value = String(normalized.passCount);
   if (cutFinalDepthInputEl) cutFinalDepthInputEl.value = String(normalized.finalDepth);
   if (cutStepOverInputEl) cutStepOverInputEl.value = String(normalized.stepOver);
   if (cutSafeZInputEl) cutSafeZInputEl.value = String(normalized.safeZ);
@@ -7223,6 +7353,16 @@ if (cutToolSelectEl) {
   });
 }
 
+if (cutStepDownInputEl) {
+  const syncPassCountInput = () => {
+    const passCount = getRequestedCutPassCount(1);
+    const tool = getCutToolById(String(cutToolSelectEl?.value || cutState.selectedToolId || ""));
+    syncCutDepthInputsForSheet(tool, activeSheetIndex, passCount);
+  };
+  cutStepDownInputEl.addEventListener("change", syncPassCountInput);
+  cutStepDownInputEl.addEventListener("blur", syncPassCountInput);
+}
+
 if (cutToolAddBtn) {
   cutToolAddBtn.addEventListener("click", () => {
     registerCustomToolFromForm();
@@ -7250,6 +7390,10 @@ if (applySheetBtn) {
       ...sheetState[sheetIndex],
       ...updated
     };
+    setSheetCutConfig(sheetIndex, sheetState[sheetIndex].cutSettings || getDefaultSheetCutConfig());
+    if (cutEditModalEl && !cutEditModalEl.classList.contains("hidden")) {
+      syncCutEditorWithActiveSheet();
+    }
     syncSheetsOrigins({ preservePartPositions: true });
     rebuildSheetsVisuals();
     relayoutSheetPieces(sheetIndex);
@@ -7326,6 +7470,10 @@ if (applyAllSheetsBtn) {
         ...sheetState[idx],
         ...updated
       };
+      setSheetCutConfig(idx, sheetState[idx].cutSettings || getDefaultSheetCutConfig());
+    }
+    if (cutEditModalEl && !cutEditModalEl.classList.contains("hidden")) {
+      syncCutEditorWithActiveSheet();
     }
 
     syncSheetsOrigins({ preservePartPositions: true });

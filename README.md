@@ -22,6 +22,7 @@ Permitir um fluxo de trabalho orientado a chapas CNC:
 - botao `Editar corte` na topbar com modal central e arrastavel
 - botao `Simular corte` na topbar ao lado de `Editar corte`
 - biblioteca de ferramentas com presets, cadastro customizado, edicao e exclusao
+- profundidade de corte automatica por espessura da chapa (passadas por faixa de espessura e profundidade final com sobrecorte)
 - setas de inicio de corte na chapa ativa para definir a origem visual do sequenciamento
 - atalho `F9` para alternar as pecas da chapa ativa em cinza (melhor visualizacao da ferramenta no corte)
 - simulacao 3D da ferramenta seguindo o caminho de corte no viewport
@@ -106,7 +107,7 @@ Abra:
 5. Use `Nova chapa` para criar outra chapa.
 6. Clique em uma chapa no painel lateral para ativar.
 7. Use `Editar chapa` para ajustar largura, altura, margens e espacamento.
-8. Use `Editar corte` para escolher ferramenta, ajustar parametros e exportar `.NC`.
+8. Use `Editar corte` para escolher ferramenta e parametros; ajuste `Passadas` e o sistema calcula automaticamente `Prof. final` e a profundidade por passada pela espessura da chapa ativa.
 9. Use `Simular corte` na topbar para rodar a simulacao da ferramenta no caminho gerado.
 10. Pressione `F9` para alternar as pecas da chapa ativa em cinza durante a simulacao.
 11. Use `Ctrl+S` para salvar o projeto atual em `.CNC3D`.
