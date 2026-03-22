@@ -31,10 +31,11 @@
       <button id="clearBtn" type="button" class="btn danger">Limpar</button>
       <button id="newSheetBtn" type="button" class="btn secondary">Nova chapa</button>
       <button id="editSheetBtn" type="button" class="btn secondary">Editar chapa</button>
-      <button id="moveToSheetBtn" type="button" class="btn secondary">Mover para chapa</button>
+      <button id="editCutBtn" type="button" class="btn secondary">Editar corte</button>
       <span id="sheetInfo" class="counter">Chapa: -</span>
       <span id="batchTime" class="counter">Tempo: 0 ms</span>
       <span id="selectedPiece" class="counter">Peca sel.: -</span>
+      <span id="projectInfo" class="counter">Projeto: -</span>
     </div>
 
   </div>
@@ -108,6 +109,107 @@
       <div class="modal-actions">
         <button id="applyAllSheetsBtn" type="button" class="btn secondary">Aplicar em todas</button>
         <button id="applySheetBtn" type="button" class="btn">Aplicar</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="cutEditModal" class="modal hidden">
+    <div id="cutEditCard" class="modal-card cut-modal-card">
+      <div id="cutEditDragHandle" class="modal-title cut-modal-title">Editar corte</div>
+      <div class="cut-grid">
+        <label class="field">Tipo de ferramenta
+          <select id="cutToolTypeSelect"></select>
+        </label>
+        <label class="field">Medida da ferramenta
+          <select id="cutToolMeasureSelect"></select>
+        </label>
+        <label class="field">Ferramenta ativa
+          <select id="cutToolSelect"></select>
+        </label>
+        <label class="field">Pós-processador
+          <select id="cutPostSelect">
+            <option value="nc_generic">NC Genérico (.NC)</option>
+            <option value="mach3">Mach3 (.NC)</option>
+            <option value="linuxcnc">LinuxCNC (.NC)</option>
+            <option value="fanuc">Fanuc (.NC)</option>
+            <option value="grbl">GRBL (.NC)</option>
+          </select>
+        </label>
+        <label class="field">Nome da ferramenta
+          <input id="cutToolNameInput" type="text" maxlength="60" placeholder="Ex.: Topo 6 mm" />
+        </label>
+        <label class="field">Compensação do corte
+          <select id="cutModeSelect">
+            <option value="on">Sobre a linha</option>
+            <option value="outside">Fora</option>
+            <option value="inside">Dentro</option>
+          </select>
+        </label>
+        <label class="field">RPM
+          <input id="cutRpmInput" type="number" min="100" step="10" value="18000" />
+        </label>
+        <label class="field">Avanço XY (mm/min)
+          <input id="cutFeedInput" type="number" min="10" step="10" value="1800" />
+        </label>
+        <label class="field">Avanço mergulho Z (mm/min)
+          <input id="cutPlungeInput" type="number" min="10" step="10" value="450" />
+        </label>
+        <label class="field">Prof. por passada (mm)
+          <input id="cutStepDownInput" type="number" min="0.1" step="0.1" value="2.5" />
+        </label>
+        <label class="field">Prof. final (mm)
+          <input id="cutFinalDepthInput" type="number" min="0.1" step="0.1" value="5" />
+        </label>
+        <label class="field">Step over (%)
+          <input id="cutStepOverInput" type="number" min="1" max="100" step="1" value="40" />
+        </label>
+        <label class="field">Safe Z (mm)
+          <input id="cutSafeZInput" type="number" min="0.1" step="0.1" value="8" />
+        </label>
+        <label class="field">X inicial (mm)
+          <input id="cutStartXInput" type="number" step="0.1" value="0" />
+        </label>
+        <label class="field">Y inicial (mm)
+          <input id="cutStartYInput" type="number" step="0.1" value="0" />
+        </label>
+        <label class="field">Entrada
+          <select id="cutEntryTypeSelect">
+            <option value="line">Reta</option>
+            <option value="ramp">Rampa</option>
+            <option value="helical">Helicoidal</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="cut-tool-actions">
+        <button id="cutToolAddBtn" type="button" class="btn secondary">Cadastrar ferramenta</button>
+        <button id="cutToolSaveBtn" type="button" class="btn secondary">Salvar edição</button>
+        <button id="cutToolDeleteBtn" type="button" class="btn danger">Excluir ferramenta</button>
+      </div>
+
+      <div class="modal-actions">
+        <button id="cutApplyAllBtn" type="button" class="btn secondary">Aplicar em todas</button>
+        <button id="cutApplyCurrentBtn" type="button" class="btn secondary">Aplicar atual</button>
+        <button id="simulateCutBtn" type="button" class="btn secondary">Simular corte</button>
+        <button id="exportNcBtn" type="button" class="btn">Exportar .NC</button>
+        <button id="closeCutModalBtn" type="button" class="btn">Fechar</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="simCutModal" class="sim-modal hidden">
+    <div id="simCutCard" class="sim-card">
+      <div id="simCutDragHandle" class="sim-head">
+        <div class="sim-title">Simulação de Corte</div>
+        <div id="simCutInfo" class="sim-info">Pronto para simular.</div>
+      </div>
+      <div class="sim-actions">
+        <button id="simSlowBtn" class="btn">Diminuir</button>
+        <button id="simFastBtn" class="btn">Acelerar</button>
+        <button id="simPauseBtn" class="btn">Pausar</button>
+        <button id="simRestartBtn" class="btn">Reiniciar</button>
+        <button id="simCloseBtn" class="btn">Fechar</button>
+        <span id="simSpeedChip" class="counter">x1.00</span>
       </div>
     </div>
   </div>

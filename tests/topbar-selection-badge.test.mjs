@@ -17,6 +17,7 @@ test("topbar nao exibe badges de render/cache e mantem badge da peca selecionada
   assert.doesNotMatch(html, /id="runtimeMode"/);
   assert.doesNotMatch(html, /id="cacheStats"/);
   assert.doesNotMatch(html, /id="pieceCount"/);
+  assert.doesNotMatch(html, /id="moveToSheetBtn"/);
   assert.match(html, /id="selectedPiece"/);
 });
 
@@ -26,4 +27,5 @@ test("badge de peca selecionada mostra codigo do arquivo sem extensao", () => {
   assert.match(appJs, /const code = fileName\.replace\(\/\\\.\(dxf\|step\|stp\)\$\/i, ""\)\.trim\(\);/);
   assert.match(appJs, /selectedPieceEl\.textContent = `Peca sel\.: \$\{displayCode\}`;/);
   assert.match(appJs, /updateSelectedPieceBadge\(selectedPart\);/);
+  assert.doesNotMatch(appJs, /moveToSheetBtn/);
 });

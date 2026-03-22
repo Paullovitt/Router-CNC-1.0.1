@@ -144,6 +144,88 @@ let inventoryVirtualResizeObserver = null;
 let inventoryVirtualWindowResizeBound = false;
 let inactiveProxyMesh = null;
 let inactiveProxyDirty = true;
+let projectFileName = "";
+
+const CUT_STORAGE_KEY = "router-cnc-cut-v1";
+const CUT_TOOL_TYPES = [
+  { key: "straight", label: "Fresa reta", measures: [3, 4, 6, 8, 12] },
+  { key: "endmill", label: "Fresa de topo", measures: [2, 3, 4, 6, 8, 10] },
+  { key: "roughing", label: "Fresa de desbaste", measures: [6, 8, 10, 12] },
+  { key: "vbit", label: "Fresa V-bit / gravação", measures: [30, 45, 60, 90, 120], unit: "°" },
+  { key: "ballnose", label: "Fresa bola", measures: [2, 3, 4, 6, 8] },
+  { key: "compression", label: "Fresa de compressão", measures: [4, 6, 8, 12] },
+  { key: "downcut", label: "Fresa downcut", measures: [3, 4, 6, 8] },
+  { key: "upcut", label: "Fresa upcut", measures: [3, 4, 6, 8, 10] },
+  { key: "surfacing", label: "Fresa de rebaixo / faceamento", measures: [12, 16, 20, 22, 25, 32] },
+  { key: "drill", label: "Broca de furação", measures: [3, 4, 5, 6, 8, 10] }
+];
+
+const CUT_POSTPROCESSORS = [
+  { key: "nc_generic", label: "NC Genérico (.NC)" },
+  { key: "mach3", label: "Mach3 (.NC)" },
+  { key: "linuxcnc", label: "LinuxCNC (.NC)" },
+  { key: "fanuc", label: "Fanuc (.NC)" },
+  { key: "grbl", label: "GRBL (.NC)" }
+];
+
+const CUT_START_CORNERS = [
+  "top_left",
+  "top_center",
+  "top_right",
+  "right_center",
+  "bottom_right",
+  "bottom_center",
+  "bottom_left",
+  "left_center"
+];
+
+const CUT_START_CORNER_LABELS = {
+  top_left: "Cima esquerda",
+  top_center: "Cima centro",
+  top_right: "Cima direita",
+  right_center: "Direita centro",
+  bottom_right: "Baixo direita",
+  bottom_center: "Baixo centro",
+  bottom_left: "Baixo esquerda",
+  left_center: "Esquerda centro"
+};
+
+const cutState = {
+  tools: [],
+  customTools: [],
+  toolIdCounter: 1,
+  selectedToolType: "straight",
+  selectedToolMeasure: 6,
+  selectedToolId: "",
+  defaultSheetConfig: null,
+  drag: { active: false, pointerId: -1, startX: 0, startY: 0, baseX: 0, baseY: 0 },
+  arrowsPickTargets: [],
+  planCache: new Map()
+};
+
+const simState = {
+  open: false,
+  running: false,
+  paused: false,
+  speed: 1.0,
+  raf: 0,
+  lastTs: 0,
+  segIndex: 0,
+  segT: 0,
+  doneLen: 0,
+  totalLen: 0,
+  segments: [],
+  trailPoints: [],
+  drag: { active: false, pointerId: -1, startX: 0, startY: 0, baseX: 0, baseY: 0 },
+  line: null,
+  toolMesh: null,
+  toolOutline: null,
+  currentSheetIndex: 0,
+  durationMs: 0,
+  elapsedMs: 0,
+  pathLine: null,
+  cutPlan: null
+};
 
 function createDxfWorkerPool(workerCount) {
   if (typeof Worker === "undefined") return null;
@@ -633,6 +715,35 @@ function deserializeSelectionPrimaryLoop(rawLoop) {
   return out.length >= 3 ? out : null;
 }
 
+function cloneCutContours(rawContours) {
+  if (!Array.isArray(rawContours)) return null;
+  const contours = [];
+  for (const contour of rawContours) {
+    const points = Array.isArray(contour?.points)
+      ? contour.points
+        .map((pt) => [Number(pt?.[0]), Number(pt?.[1])])
+        .filter((pt) => Number.isFinite(pt[0]) && Number.isFinite(pt[1]))
+      : [];
+    if (points.length < 2) continue;
+    contours.push({
+      points,
+      closed: !!contour?.closed
+    });
+  }
+  return contours.length > 0 ? contours : null;
+}
+
+function applyGroupCutMetadata(group, metadata = {}) {
+  if (!group || !group.userData) return;
+  if (metadata.sourceType) group.userData.sourceType = String(metadata.sourceType);
+  if (metadata.partCode) group.userData.partCode = String(metadata.partCode);
+  if (metadata.fileName) group.userData.fileName = String(metadata.fileName);
+  if (Number.isFinite(Number(metadata.width))) group.userData.partWidth = Number(metadata.width);
+  if (Number.isFinite(Number(metadata.height))) group.userData.partHeight = Number(metadata.height);
+  const contours = cloneCutContours(metadata.cutContours);
+  if (contours) group.userData.cutContours = contours;
+}
+
 function serializeMeshGroupSnapshot(localGroup, thickness) {
   if (!localGroup || !localGroup.isObject3D) return null;
   localGroup.updateMatrixWorld(true);
@@ -659,6 +770,12 @@ function serializeMeshGroupSnapshot(localGroup, thickness) {
   return {
     thickness: Number(thickness),
     selectionPrimaryLoop: serializeSelectionPrimaryLoop(localGroup.userData?.selectionPrimaryLoop),
+    sourceType: String(localGroup.userData?.sourceType || ""),
+    partCode: String(localGroup.userData?.partCode || ""),
+    fileName: String(localGroup.userData?.fileName || localGroup.name || ""),
+    width: Number(localGroup.userData?.partWidth || 0),
+    height: Number(localGroup.userData?.partHeight || 0),
+    cutContours: cloneCutContours(localGroup.userData?.cutContours),
     meshes
   };
 }
@@ -685,6 +802,7 @@ function buildGroupFromMeshSnapshot(snapshot, fallbackName = "") {
 
   const selLoop = deserializeSelectionPrimaryLoop(snapshot.selectionPrimaryLoop);
   if (selLoop) group.userData.selectionPrimaryLoop = selLoop;
+  applyGroupCutMetadata(group, snapshot);
 
   for (const meshData of snapshot.meshes) {
     const geometry = deserializeBufferGeometry(meshData.geometry);
@@ -864,7 +982,342 @@ function setSheetCreationTemplate(config) {
 
 function createSheetFrom(config = null) {
   const source = config || getSheetCreationTemplate();
-  return cloneSheetConfig(source);
+  const sheet = cloneSheetConfig(source);
+  sheet.cutSettings = cloneCutConfig(source?.cutSettings || getDefaultSheetCutConfig());
+  sheet.cutStartCorner = normalizeCutStartCorner(source?.cutStartCorner);
+  return sheet;
+}
+
+function findCutToolType(typeKey) {
+  return CUT_TOOL_TYPES.find((entry) => entry.key === String(typeKey || "").toLowerCase()) || CUT_TOOL_TYPES[0];
+}
+
+function getCutMeasureUnit(typeKey) {
+  return String(findCutToolType(typeKey)?.unit || "mm");
+}
+
+function formatCutMeasureLabel(typeKey, measure) {
+  const numeric = Number(measure || 0);
+  const unit = getCutMeasureUnit(typeKey);
+  if (unit === "°") return `${numeric.toFixed(0)}${unit}`;
+  return `${numeric.toFixed(0)} ${unit}`;
+}
+
+function buildCutToolId(typeKey, measure, customId = "") {
+  const type = String(typeKey || "straight").toLowerCase();
+  const normalizedMeasure = Number(measure || 0);
+  if (customId) return `custom:${String(customId)}`;
+  return `builtin:${type}:${normalizedMeasure}`;
+}
+
+function sanitizePositive(value, fallback, min = 0.0001, max = Infinity) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return Number(fallback);
+  return THREE.MathUtils.clamp(numeric, min, max);
+}
+
+function buildToolPresetDefaults(typeKey, measure) {
+  const mm = Math.max(0.1, Number(measure || 0));
+  const type = String(typeKey || "straight").toLowerCase();
+  let rpm = 18000;
+  let feed = 1800;
+  let plunge = 450;
+  let stepDown = Math.max(0.6, Math.min(mm * 0.45, 3));
+  let finalDepth = DEFAULT_PART_THICKNESS;
+  let stepOver = 40;
+  let safeZ = 8;
+  let entryType = "ramp";
+
+  switch (type) {
+    case "endmill":
+      rpm = mm <= 3 ? 20000 : 18000;
+      feed = mm <= 3 ? 1500 : 2200;
+      plunge = mm <= 3 ? 300 : 550;
+      stepDown = Math.max(0.5, Math.min(mm * 0.42, 3.2));
+      stepOver = 36;
+      break;
+    case "roughing":
+      rpm = 16500;
+      feed = 2600;
+      plunge = 650;
+      stepDown = Math.max(1.2, Math.min(mm * 0.5, 4.2));
+      stepOver = 55;
+      break;
+    case "vbit":
+      rpm = 16000;
+      feed = 1200;
+      plunge = 240;
+      stepDown = 1.2;
+      stepOver = 16;
+      safeZ = 6;
+      entryType = "line";
+      break;
+    case "ballnose":
+      rpm = 18000;
+      feed = 1400;
+      plunge = 260;
+      stepDown = Math.max(0.4, Math.min(mm * 0.25, 1.8));
+      stepOver = 12;
+      break;
+    case "compression":
+      rpm = 18000;
+      feed = 2400;
+      plunge = 550;
+      stepDown = Math.max(1.0, Math.min(mm * 0.45, 3.8));
+      stepOver = 42;
+      break;
+    case "downcut":
+      rpm = 17500;
+      feed = 2000;
+      plunge = 420;
+      stepDown = Math.max(0.8, Math.min(mm * 0.36, 2.8));
+      stepOver = 34;
+      break;
+    case "upcut":
+      rpm = 18500;
+      feed = 2400;
+      plunge = 600;
+      stepDown = Math.max(1.0, Math.min(mm * 0.48, 3.8));
+      stepOver = 40;
+      break;
+    case "surfacing":
+      rpm = 12000;
+      feed = 3200;
+      plunge = 420;
+      stepDown = 0.8;
+      stepOver = 72;
+      safeZ = 10;
+      entryType = "line";
+      break;
+    case "drill":
+      rpm = 9000;
+      feed = 900;
+      plunge = 320;
+      stepDown = Math.max(0.8, Math.min(mm * 0.7, 5.5));
+      stepOver = 100;
+      safeZ = 8;
+      entryType = "line";
+      break;
+    default:
+      break;
+  }
+
+  return {
+    rpm,
+    feed,
+    plunge,
+    stepDown,
+    finalDepth,
+    stepOver,
+    safeZ,
+    entryType
+  };
+}
+
+function buildCutToolName(typeKey, measure) {
+  const type = findCutToolType(typeKey);
+  return `${type.label} ${formatCutMeasureLabel(type.key, measure)}`;
+}
+
+function normalizeCutToolPreset(rawTool, { builtin = false } = {}) {
+  const type = findCutToolType(rawTool?.typeKey || rawTool?.toolType || cutState.selectedToolType || "straight");
+  const availableMeasures = Array.isArray(type.measures) && type.measures.length > 0 ? type.measures : [6];
+  const requestedMeasure = Number(rawTool?.measure ?? rawTool?.toolMeasure ?? availableMeasures[0]);
+  const fallbackMeasure = availableMeasures.includes(requestedMeasure) ? requestedMeasure : availableMeasures[0];
+  const defaults = buildToolPresetDefaults(type.key, fallbackMeasure);
+  const builtinId = buildCutToolId(type.key, fallbackMeasure);
+  return {
+    id: String(rawTool?.id || builtinId),
+    builtin: !!(builtin || rawTool?.builtin),
+    typeKey: type.key,
+    measure: fallbackMeasure,
+    unit: getCutMeasureUnit(type.key),
+    name: String(rawTool?.name || buildCutToolName(type.key, fallbackMeasure)).trim(),
+    rpm: sanitizePositive(rawTool?.rpm, defaults.rpm, 100, 40000),
+    feed: sanitizePositive(rawTool?.feed, defaults.feed, 10, 40000),
+    plunge: sanitizePositive(rawTool?.plunge, defaults.plunge, 10, 20000),
+    stepDown: sanitizePositive(rawTool?.stepDown, defaults.stepDown, 0.1, 500),
+    finalDepth: sanitizePositive(rawTool?.finalDepth, defaults.finalDepth, 0.1, 1000),
+    stepOver: sanitizePositive(rawTool?.stepOver, defaults.stepOver, 1, 100),
+    safeZ: sanitizePositive(rawTool?.safeZ, defaults.safeZ, 0.1, 1000),
+    entryType: ["line", "ramp", "helical"].includes(String(rawTool?.entryType || ""))
+      ? String(rawTool.entryType)
+      : defaults.entryType
+  };
+}
+
+function buildBuiltinCutTools() {
+  const tools = [];
+  for (const type of CUT_TOOL_TYPES) {
+    for (const measure of type.measures) {
+      tools.push(normalizeCutToolPreset({
+        id: buildCutToolId(type.key, measure),
+        typeKey: type.key,
+        measure,
+        name: buildCutToolName(type.key, measure)
+      }, { builtin: true }));
+    }
+  }
+  return tools;
+}
+
+function cloneCutConfig(rawConfig) {
+  const toolType = String(rawConfig?.toolType || "straight");
+  const toolMeasure = Number(rawConfig?.toolMeasure || 6);
+  const defaults = buildToolPresetDefaults(toolType, toolMeasure);
+  return {
+    toolId: String(rawConfig?.toolId || buildCutToolId("straight", 6)),
+    toolType,
+    toolMeasure,
+    toolName: String(rawConfig?.toolName || buildCutToolName(toolType, toolMeasure)),
+    post: CUT_POSTPROCESSORS.some((entry) => entry.key === rawConfig?.post) ? rawConfig.post : "nc_generic",
+    mode: ["on", "outside", "inside"].includes(String(rawConfig?.mode || "")) ? String(rawConfig.mode) : "outside",
+    rpm: sanitizePositive(rawConfig?.rpm, defaults.rpm, 100, 40000),
+    feed: sanitizePositive(rawConfig?.feed, defaults.feed, 10, 40000),
+    plunge: sanitizePositive(rawConfig?.plunge, defaults.plunge, 10, 20000),
+    stepDown: sanitizePositive(rawConfig?.stepDown, defaults.stepDown, 0.1, 1000),
+    finalDepth: sanitizePositive(rawConfig?.finalDepth, rawConfig?.finalDepth || DEFAULT_PART_THICKNESS, 0.1, 1000),
+    stepOver: sanitizePositive(rawConfig?.stepOver, defaults.stepOver, 1, 100),
+    safeZ: sanitizePositive(rawConfig?.safeZ, defaults.safeZ, 0.1, 1000),
+    startX: Number.isFinite(Number(rawConfig?.startX)) ? Number(rawConfig.startX) : 0,
+    startY: Number.isFinite(Number(rawConfig?.startY)) ? Number(rawConfig.startY) : 0,
+    entryType: ["line", "ramp", "helical"].includes(String(rawConfig?.entryType || ""))
+      ? String(rawConfig.entryType)
+      : defaults.entryType
+  };
+}
+
+function getDefaultSheetCutConfig() {
+  if (cutState.defaultSheetConfig) return cloneCutConfig(cutState.defaultSheetConfig);
+  const tool = normalizeCutToolPreset({
+    id: buildCutToolId("straight", 6),
+    typeKey: "straight",
+    measure: 6
+  }, { builtin: true });
+  cutState.defaultSheetConfig = cloneCutConfig({
+    toolId: tool.id,
+    toolType: tool.typeKey,
+    toolMeasure: tool.measure,
+    toolName: tool.name,
+    post: "nc_generic",
+    mode: "outside",
+    rpm: tool.rpm,
+    feed: tool.feed,
+    plunge: tool.plunge,
+    stepDown: tool.stepDown,
+    finalDepth: tool.finalDepth,
+    stepOver: tool.stepOver,
+    safeZ: tool.safeZ,
+    startX: 0,
+    startY: 0,
+    entryType: tool.entryType
+  });
+  return cloneCutConfig(cutState.defaultSheetConfig);
+}
+
+function normalizeCutStartCorner(value) {
+  const raw = String(value || "").toLowerCase();
+  return CUT_START_CORNERS.includes(raw) ? raw : "bottom_left";
+}
+
+function ensureSheetCutState(sheet) {
+  if (!sheet || typeof sheet !== "object") return null;
+  sheet.cutSettings = cloneCutConfig(sheet.cutSettings || getDefaultSheetCutConfig());
+  sheet.cutStartCorner = normalizeCutStartCorner(sheet.cutStartCorner);
+  return sheet;
+}
+
+function getSheetCutConfig(sheetIndex = activeSheetIndex) {
+  const idx = getValidSheetIndex(sheetIndex);
+  if (idx < 0) return cloneCutConfig(getDefaultSheetCutConfig());
+  const sheet = ensureSheetCutState(sheetState[idx]);
+  return cloneCutConfig(sheet?.cutSettings || getDefaultSheetCutConfig());
+}
+
+function setSheetCutConfig(sheetIndex, nextConfig) {
+  const idx = getValidSheetIndex(sheetIndex);
+  if (idx < 0) return false;
+  const sheet = ensureSheetCutState(sheetState[idx]);
+  if (!sheet) return false;
+  sheet.cutSettings = cloneCutConfig(nextConfig);
+  cutState.planCache.delete(idx);
+  return true;
+}
+
+function getSheetCutStartCorner(sheetIndex = activeSheetIndex) {
+  const idx = getValidSheetIndex(sheetIndex);
+  if (idx < 0) return normalizeCutStartCorner();
+  const sheet = ensureSheetCutState(sheetState[idx]);
+  return normalizeCutStartCorner(sheet?.cutStartCorner);
+}
+
+function setSheetCutStartCorner(sheetIndex, nextCorner) {
+  const idx = getValidSheetIndex(sheetIndex);
+  if (idx < 0) return false;
+  const sheet = ensureSheetCutState(sheetState[idx]);
+  if (!sheet) return false;
+  sheet.cutStartCorner = normalizeCutStartCorner(nextCorner);
+  cutState.planCache.delete(idx);
+  return true;
+}
+
+function getCutToolById(toolId) {
+  return cutState.tools.find((entry) => entry.id === String(toolId || "")) || null;
+}
+
+function syncCutToolCollection(rawCustomTools = null) {
+  if (Array.isArray(rawCustomTools)) cutState.customTools = rawCustomTools.map((tool) => normalizeCutToolPreset(tool));
+  const builtinTools = buildBuiltinCutTools();
+  cutState.tools = builtinTools.concat(cutState.customTools.map((tool) => ({
+    ...tool,
+    builtin: false
+  })));
+}
+
+function buildCutStoragePayload() {
+  return {
+    toolIdCounter: Number(cutState.toolIdCounter || 1),
+    customTools: cutState.customTools.map((tool) => ({
+      id: tool.id,
+      typeKey: tool.typeKey,
+      measure: tool.measure,
+      name: tool.name,
+      rpm: tool.rpm,
+      feed: tool.feed,
+      plunge: tool.plunge,
+      stepDown: tool.stepDown,
+      finalDepth: tool.finalDepth,
+      stepOver: tool.stepOver,
+      safeZ: tool.safeZ,
+      entryType: tool.entryType
+    })),
+    defaultSheetConfig: cloneCutConfig(getDefaultSheetCutConfig()),
+    projectFileName: String(projectFileName || "")
+  };
+}
+
+function persistCutState() {
+  try {
+    localStorage.setItem(CUT_STORAGE_KEY, JSON.stringify(buildCutStoragePayload()));
+  } catch (_error) {
+    // no-op
+  }
+}
+
+function loadCutStateFromStorage() {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(localStorage.getItem(CUT_STORAGE_KEY) || "null");
+  } catch (_error) {
+    parsed = null;
+  }
+
+  cutState.toolIdCounter = Math.max(1, Number(parsed?.toolIdCounter || 1));
+  cutState.defaultSheetConfig = cloneCutConfig(parsed?.defaultSheetConfig || getDefaultSheetCutConfig());
+  if (String(parsed?.projectFileName || "").trim()) {
+    projectFileName = String(parsed.projectFileName).trim();
+  }
+  syncCutToolCollection(Array.isArray(parsed?.customTools) ? parsed.customTools : []);
 }
 
 function shouldUseInactiveProxyInstancing() {
@@ -1429,7 +1882,94 @@ function updateSheetRingTransition(nowMs = performance.now()) {
   return true;
 }
 
+function clearCutArrowTargets() {
+  cutState.arrowsPickTargets.length = 0;
+}
+
+function buildSheetStartArrowPoints(sheet) {
+  const minX = Number(sheet.originX || 0);
+  const minY = Number(sheet.originY || 0);
+  const maxX = minX + Number(sheet.width || 0);
+  const maxY = minY + Number(sheet.height || 0);
+  const offset = 58;
+  return [
+    { corner: "top_left", x: minX - offset, y: maxY + offset, dx: 1, dy: -1 },
+    { corner: "top_center", x: (minX + maxX) * 0.5, y: maxY + offset, dx: 0, dy: -1 },
+    { corner: "top_right", x: maxX + offset, y: maxY + offset, dx: -1, dy: -1 },
+    { corner: "right_center", x: maxX + offset, y: (minY + maxY) * 0.5, dx: -1, dy: 0 },
+    { corner: "bottom_right", x: maxX + offset, y: minY - offset, dx: -1, dy: 1 },
+    { corner: "bottom_center", x: (minX + maxX) * 0.5, y: minY - offset, dx: 0, dy: 1 },
+    { corner: "bottom_left", x: minX - offset, y: minY - offset, dx: 1, dy: 1 },
+    { corner: "left_center", x: minX - offset, y: (minY + maxY) * 0.5, dx: 1, dy: 0 }
+  ];
+}
+
+function createSheetStartArrow(point, sheetIndex, isSelected) {
+  const group = new THREE.Group();
+  group.name = `cut-start-arrow-${point.corner}`;
+  group.position.z = Number(sheetState[sheetIndex]?.originZ || 0) + 1.2;
+  const color = isSelected ? 0x38bdf8 : 0xe5eef9;
+  const dir = new THREE.Vector2(Number(point.dx || 0), Number(point.dy || 0)).normalize();
+  const normal = new THREE.Vector2(-dir.y, dir.x);
+  const shaftLen = 48;
+  const headLen = 20;
+  const halfWidth = 7;
+
+  const base = new THREE.Vector3(point.x, point.y, 0);
+  const tip = new THREE.Vector3(point.x + dir.x * shaftLen, point.y + dir.y * shaftLen, 0);
+  const headBase = new THREE.Vector3(
+    tip.x - dir.x * headLen,
+    tip.y - dir.y * headLen,
+    0
+  );
+  const left = new THREE.Vector3(
+    headBase.x + normal.x * halfWidth,
+    headBase.y + normal.y * halfWidth,
+    0
+  );
+  const right = new THREE.Vector3(
+    headBase.x - normal.x * halfWidth,
+    headBase.y - normal.y * halfWidth,
+    0
+  );
+
+  const shaftGeometry = new THREE.BufferGeometry().setFromPoints([base, headBase]);
+  const shaftMaterial = new THREE.LineBasicMaterial({
+    color,
+    transparent: true,
+    opacity: isSelected ? 1 : 0.86,
+    toneMapped: false
+  });
+  const shaft = new THREE.Line(shaftGeometry, shaftMaterial);
+  shaft.raycast = () => {};
+  group.add(shaft);
+
+  const triangleGeometry = new THREE.BufferGeometry();
+  triangleGeometry.setAttribute("position", new THREE.Float32BufferAttribute([
+    tip.x, tip.y, 0,
+    left.x, left.y, 0,
+    right.x, right.y, 0
+  ], 3));
+  triangleGeometry.computeVertexNormals();
+  const triangleMaterial = new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity: isSelected ? 1 : 0.92,
+    side: THREE.DoubleSide,
+    depthTest: false,
+    toneMapped: false
+  });
+  const head = new THREE.Mesh(triangleGeometry, triangleMaterial);
+  head.userData.sheetIndex = sheetIndex;
+  head.userData.cutStartCorner = point.corner;
+  group.userData.cutStartCorner = point.corner;
+  cutState.arrowsPickTargets.push(head);
+  group.add(head);
+  return group;
+}
+
 function clearSheetVisuals() {
+  clearCutArrowTargets();
   while (sheetsGroup.children.length) {
     const child = sheetsGroup.children[0];
     sheetsGroup.remove(child);
@@ -1469,7 +2009,7 @@ function createSheetVolumeEdges(boxGeometry, colorHex) {
 function rebuildSheetsVisuals() {
   clearSheetVisuals();
   for (let idx = 0; idx < sheetState.length; idx += 1) {
-    const sheet = sheetState[idx];
+    const sheet = ensureSheetCutState(sheetState[idx]);
     if (!sheet) continue;
 
     const isActive = idx === activeSheetIndex;
@@ -1531,6 +2071,13 @@ function rebuildSheetsVisuals() {
     );
     usableBorder.position.z = Number(sheet.originZ || 0) + 0.55;
     wrapper.add(usableBorder);
+
+    if (isActive) {
+      const selectedCorner = getSheetCutStartCorner(idx);
+      for (const point of buildSheetStartArrowPoints(sheet)) {
+        wrapper.add(createSheetStartArrow(point, idx, point.corner === selectedCorner));
+      }
+    }
 
     sheetsGroup.add(wrapper);
   }
@@ -1612,17 +2159,20 @@ function setActiveSheet(index, { animate = false } = {}) {
   const idx = getValidSheetIndex(index);
   if (idx < 0) return;
   activeSheetIndex = idx;
+  ensureSheetCutState(sheetState[idx]);
   inactiveProxyDirty = true;
   if (animate) {
     startSheetRingTransition();
     updateSheetListUi();
     updateSheetInfoBadge();
+    if (cutEditModalEl && !cutEditModalEl.classList.contains("hidden")) syncCutEditorWithActiveSheet();
     return;
   }
   syncSheetsOrigins({ preservePartPositions: true });
   rebuildSheetsVisuals();
   updateSheetListUi();
   updateSheetInfoBadge();
+  if (cutEditModalEl && !cutEditModalEl.classList.contains("hidden")) syncCutEditorWithActiveSheet();
   updateGlobalBounds();
 }
 
@@ -1828,7 +2378,29 @@ function partFromIntersectionObject(object) {
   return null;
 }
 
+function pickCutArrowAtPointer(event) {
+  if (!Array.isArray(cutState.arrowsPickTargets) || cutState.arrowsPickTargets.length === 0) return null;
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointerNdc, camera);
+  const hits = raycaster.intersectObjects(cutState.arrowsPickTargets, false);
+  if (hits.length < 1) return null;
+  return hits[0]?.object || null;
+}
+
 function pickPartAtPointer(event) {
+  const arrowHit = pickCutArrowAtPointer(event);
+  if (arrowHit?.userData?.cutStartCorner) {
+    const sheetIndex = getValidSheetIndex(arrowHit.userData.sheetIndex);
+    if (sheetIndex >= 0) {
+      setSheetCutStartCorner(sheetIndex, arrowHit.userData.cutStartCorner);
+      rebuildSheetsVisuals();
+      persistCutState();
+    }
+    return;
+  }
+
   const rect = renderer.domElement.getBoundingClientRect();
   pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
   pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -1890,6 +2462,854 @@ window.addEventListener("keydown", (event) => {
   updateSheetListUi();
   updateSheetInfoBadge();
 });
+
+function inferPartSourceType(part) {
+  const explicit = String(part?.userData?.sourceType || "").toLowerCase();
+  if (explicit === PART_KIND_DXF || explicit === "step") return explicit;
+  return /\.step$|\.stp$/i.test(String(part?.name || "")) ? "step" : PART_KIND_DXF;
+}
+
+function getPartCode(part) {
+  return String(part?.userData?.partCode || extractPartCodeFromName(part?.name || ""));
+}
+
+function transformPartPointToWorld2D(part, x, y) {
+  const point = new THREE.Vector3(Number(x || 0), Number(y || 0), 0);
+  part.updateMatrixWorld(true);
+  point.applyMatrix4(part.matrixWorld);
+  return new THREE.Vector2(point.x, point.y);
+}
+
+function transformContourToWorld2D(part, rawPoints) {
+  const output = [];
+  for (const rawPoint of (rawPoints || [])) {
+    const x = Number(Array.isArray(rawPoint) ? rawPoint[0] : rawPoint?.x);
+    const y = Number(Array.isArray(rawPoint) ? rawPoint[1] : rawPoint?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    output.push(transformPartPointToWorld2D(part, x, y));
+  }
+  return output;
+}
+
+function buildBoundsLoopFromPart(part) {
+  const bounds = getCachedPartBounds(part);
+  if (!bounds) return [];
+  return [
+    new THREE.Vector2(bounds.min.x, bounds.min.y),
+    new THREE.Vector2(bounds.max.x, bounds.min.y),
+    new THREE.Vector2(bounds.max.x, bounds.max.y),
+    new THREE.Vector2(bounds.min.x, bounds.max.y)
+  ];
+}
+
+function getPartCutContours(part) {
+  const contours = cloneCutContours(part?.userData?.cutContours);
+  if (Array.isArray(contours) && contours.length > 0) {
+    return contours
+      .map((contour) => {
+        const points = transformContourToWorld2D(part, contour.points);
+        return points.length >= 2 ? { points, closed: !!contour.closed } : null;
+      })
+      .filter(Boolean);
+  }
+
+  const primaryLoop = Array.isArray(part?.userData?.selectionPrimaryLoop)
+    ? part.userData.selectionPrimaryLoop
+    : null;
+  if (primaryLoop && primaryLoop.length >= 3) {
+    const points = primaryLoop
+      .map((point) => transformPartPointToWorld2D(part, point.x, point.y))
+      .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+    if (points.length >= 3) return [{ points, closed: true }];
+  }
+
+  const boundsLoop = buildBoundsLoopFromPart(part);
+  if (boundsLoop.length >= 4) return [{ points: boundsLoop, closed: true }];
+  return [];
+}
+
+function buildLoopSamplePoint(points) {
+  if (!Array.isArray(points) || points.length < 1) return new THREE.Vector2();
+  let sumX = 0;
+  let sumY = 0;
+  for (const point of points) {
+    sumX += Number(point.x || 0);
+    sumY += Number(point.y || 0);
+  }
+  return new THREE.Vector2(sumX / points.length, sumY / points.length);
+}
+
+function buildLoopBoundingBox(points) {
+  if (!Array.isArray(points) || points.length < 1) return null;
+  let minX = Number(points[0].x);
+  let minY = Number(points[0].y);
+  let maxX = Number(points[0].x);
+  let maxY = Number(points[0].y);
+  for (const point of points) {
+    minX = Math.min(minX, Number(point.x));
+    minY = Math.min(minY, Number(point.y));
+    maxX = Math.max(maxX, Number(point.x));
+    maxY = Math.max(maxY, Number(point.y));
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+function bboxContainsPoint2D(bbox, point, tolerance = 1e-6) {
+  if (!bbox || !point) return false;
+  return (
+    Number(point.x) >= Number(bbox.minX) - tolerance &&
+    Number(point.x) <= Number(bbox.maxX) + tolerance &&
+    Number(point.y) >= Number(bbox.minY) - tolerance &&
+    Number(point.y) <= Number(bbox.maxY) + tolerance
+  );
+}
+
+function classifyClosedCutLoops(closedLoops) {
+  const records = [];
+  for (const loop of (closedLoops || [])) {
+    const points = Array.isArray(loop?.points) ? loop.points : [];
+    if (points.length < 3) continue;
+    records.push({
+      points,
+      bbox: buildLoopBoundingBox(points),
+      area: Math.abs(polygonAreaSigned(points)),
+      sample: buildLoopSamplePoint(points),
+      parent: -1,
+      depth: 0
+    });
+  }
+
+  for (let i = 0; i < records.length; i += 1) {
+    const current = records[i];
+    let parent = -1;
+    for (let j = 0; j < records.length; j += 1) {
+      if (i === j) continue;
+      const candidate = records[j];
+      if (!(candidate.area > current.area + EPS)) continue;
+      if (!bboxContainsPoint2D(candidate.bbox, current.sample, 0.01)) continue;
+      const closedCandidate = buildClosedPointList(candidate.points);
+      if (!closedCandidate || closedCandidate.length < 4) continue;
+      if (!pointInPolygonStrict(current.sample, closedCandidate)) continue;
+      if (parent === -1 || candidate.area < records[parent].area) parent = j;
+    }
+    current.parent = parent;
+  }
+
+  function resolveDepth(index) {
+    const entry = records[index];
+    if (!entry) return 0;
+    if (entry.parent < 0) return 0;
+    return resolveDepth(entry.parent) + 1;
+  }
+
+  for (let i = 0; i < records.length; i += 1) records[i].depth = resolveDepth(i);
+  return records;
+}
+
+function getToolCompensationRadius(cutConfig) {
+  if (String(cutConfig?.toolType || "") === "vbit") return 0;
+  if (String(cutConfig?.toolType || "") === "drill") return 0;
+  return Math.max(0, Number(cutConfig?.toolMeasure || 0) * 0.5);
+}
+
+function offsetClosedLoop(points, distance) {
+  const input = Array.isArray(points) ? points : [];
+  if (input.length < 3 || Math.abs(distance) < 1e-6) return input.map((point) => point.clone());
+  const area = polygonAreaSigned(input);
+  if (Math.abs(area) < 1e-8) return input.map((point) => point.clone());
+  const outwardSign = area < 0 ? 1 : -1;
+  const leftNormal = (a, b) => {
+    const dx = Number(b.x) - Number(a.x);
+    const dy = Number(b.y) - Number(a.y);
+    const len = Math.hypot(dx, dy) || 1;
+    return new THREE.Vector2(-dy / len, dx / len);
+  };
+
+  const output = [];
+  for (let idx = 0; idx < input.length; idx += 1) {
+    const prev = input[(idx - 1 + input.length) % input.length];
+    const current = input[idx];
+    const next = input[(idx + 1) % input.length];
+    const n1 = leftNormal(prev, current);
+    const n2 = leftNormal(current, next);
+    const miter = n1.clone().add(n2);
+    let scale = distance * outwardSign;
+    const denom = miter.lengthSq() > 1e-8 ? miter.clone().normalize().dot(n1) : 0;
+    if (Math.abs(denom) > 1e-5 && miter.lengthSq() > 1e-8) {
+      scale /= denom;
+      output.push(current.clone().add(miter.normalize().multiplyScalar(scale)));
+    } else {
+      output.push(current.clone().add(n1.multiplyScalar(scale)));
+    }
+  }
+  return output;
+}
+
+function rotateClosedLoopToNearestPoint(points, anchor) {
+  const input = Array.isArray(points) ? points : [];
+  if (input.length < 2) return input.map((point) => point.clone());
+  let bestIndex = 0;
+  let bestDistance = Infinity;
+  for (let idx = 0; idx < input.length; idx += 1) {
+    const point = input[idx];
+    const distance = anchor.distanceTo(point);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = idx;
+    }
+  }
+  const rotated = [];
+  for (let idx = 0; idx < input.length; idx += 1) {
+    rotated.push(input[(bestIndex + idx) % input.length].clone());
+  }
+  return rotated;
+}
+
+function orientOpenPathToAnchor(points, anchor) {
+  const input = Array.isArray(points) ? points : [];
+  if (input.length < 2) return input.map((point) => point.clone());
+  const startDistance = anchor.distanceTo(input[0]);
+  const endDistance = anchor.distanceTo(input[input.length - 1]);
+  return endDistance < startDistance
+    ? input.slice().reverse().map((point) => point.clone())
+    : input.map((point) => point.clone());
+}
+
+function buildSheetCutAnchor(sheet, startCorner) {
+  const minX = Number(sheet.originX || 0);
+  const minY = Number(sheet.originY || 0);
+  const maxX = minX + Number(sheet.width || 0);
+  const maxY = minY + Number(sheet.height || 0);
+  switch (normalizeCutStartCorner(startCorner)) {
+    case "top_left": return new THREE.Vector2(minX, maxY);
+    case "top_center": return new THREE.Vector2((minX + maxX) * 0.5, maxY);
+    case "top_right": return new THREE.Vector2(maxX, maxY);
+    case "right_center": return new THREE.Vector2(maxX, (minY + maxY) * 0.5);
+    case "bottom_right": return new THREE.Vector2(maxX, minY);
+    case "bottom_center": return new THREE.Vector2((minX + maxX) * 0.5, minY);
+    case "left_center": return new THREE.Vector2(minX, (minY + maxY) * 0.5);
+    case "bottom_left":
+    default:
+      return new THREE.Vector2(minX, minY);
+  }
+}
+
+function buildCanonicalPathSignature(points, closed) {
+  const coords = (points || []).map((point) => `${Number(point.x).toFixed(3)},${Number(point.y).toFixed(3)}`);
+  if (coords.length < 2) return "";
+  if (!closed) {
+    const direct = coords.join("|");
+    const reverse = coords.slice().reverse().join("|");
+    return direct < reverse ? direct : reverse;
+  }
+
+  const variants = [];
+  for (let shift = 0; shift < coords.length; shift += 1) {
+    const direct = coords.slice(shift).concat(coords.slice(0, shift)).join("|");
+    const reversedCoords = coords.slice().reverse();
+    const reverse = reversedCoords.slice(shift).concat(reversedCoords.slice(0, shift)).join("|");
+    variants.push(direct, reverse);
+  }
+  variants.sort();
+  return variants[0] || "";
+}
+
+function buildCutJobsForPart(part, cutConfig, anchor) {
+  const contours = getPartCutContours(part);
+  if (contours.length === 0) return [];
+  const openContours = contours.filter((contour) => !contour.closed);
+  const closedContours = classifyClosedCutLoops(contours.filter((contour) => contour.closed));
+  const jobs = [];
+  const compensationRadius = getToolCompensationRadius(cutConfig);
+  const compensationMode = String(cutConfig?.mode || "outside");
+
+  for (const contour of openContours) {
+    const orderedPoints = orientOpenPathToAnchor(contour.points, anchor);
+    jobs.push({
+      id: `${getPartCode(part)}:line:${jobs.length + 1}`,
+      code: getPartCode(part),
+      sourceType: inferPartSourceType(part),
+      part,
+      category: "line",
+      priority: 0,
+      closed: false,
+      points: orderedPoints,
+      mode: "on"
+    });
+  }
+
+  for (const loop of closedContours) {
+    const rawPoints = loop.points.map((point) => point.clone());
+    const isHole = (loop.depth % 2) === 1;
+    let adjusted = rawPoints;
+    if (compensationMode !== "on" && compensationRadius > 0) {
+      const direction = compensationMode === "outside"
+        ? (isHole ? -1 : 1)
+        : (isHole ? 1 : -1);
+      adjusted = offsetClosedLoop(rawPoints, compensationRadius * direction);
+    }
+    const orderedPoints = rotateClosedLoopToNearestPoint(adjusted, anchor);
+    jobs.push({
+      id: `${getPartCode(part)}:${isHole ? "hole" : "outer"}:${jobs.length + 1}`,
+      code: getPartCode(part),
+      sourceType: inferPartSourceType(part),
+      part,
+      category: isHole ? "hole" : "outer",
+      priority: isHole ? 1 : 3,
+      closed: true,
+      points: orderedPoints,
+      mode: compensationMode
+    });
+  }
+
+  return jobs;
+}
+
+function buildCutPlanCacheKey(sheetIndex, cutConfig, startCorner, parts) {
+  const payload = {
+    sheetIndex,
+    startCorner,
+    config: cloneCutConfig(cutConfig),
+    parts: parts.map((part) => ({
+      code: getPartCode(part),
+      name: String(part.name || ""),
+      sourceType: inferPartSourceType(part),
+      px: Number(part.position?.x || 0).toFixed(3),
+      py: Number(part.position?.y || 0).toFixed(3),
+      pz: Number(part.position?.z || 0).toFixed(3),
+      rz: Number(part.rotation?.z || 0).toFixed(6),
+      sx: Number(part.scale?.x || 1).toFixed(4),
+      sy: Number(part.scale?.y || 1).toFixed(4),
+      sz: Number(part.scale?.z || 1).toFixed(4),
+      contourCount: Array.isArray(part.userData?.cutContours) ? part.userData.cutContours.length : 0
+    }))
+  };
+  return JSON.stringify(payload);
+}
+
+function segmentDistance3D(from, to) {
+  const dx = Number(to.x) - Number(from.x);
+  const dy = Number(to.y) - Number(from.y);
+  const dz = Number(to.z) - Number(from.z);
+  return Math.hypot(dx, dy, dz);
+}
+
+function buildSegment(from, to, speedMmPerMin, kind) {
+  const distance = segmentDistance3D(from, to);
+  const speed = Math.max(1, Number(speedMmPerMin || 1));
+  return {
+    from: from.clone(),
+    to: to.clone(),
+    kind,
+    distance,
+    durationMs: Math.max(12, (distance / speed) * 60000)
+  };
+}
+
+function appendEntrySegments(segments, currentPoint, firstPoint, targetDepth, cutConfig, job) {
+  const safeZ = Number(cutConfig.safeZ || 8);
+  const plungeSpeed = Number(cutConfig.plunge || 200);
+  const feedSpeed = Number(cutConfig.feed || 1200);
+  const entryType = String(cutConfig.entryType || "line");
+  if (entryType === "helical" && job.closed && Number(cutConfig.toolMeasure || 0) > 0) {
+    const radius = Math.max(1, Number(cutConfig.toolMeasure || 0) * 0.4);
+    const turns = 12;
+    let prev = currentPoint.clone();
+    for (let idx = 1; idx <= turns; idx += 1) {
+      const t = idx / turns;
+      const angle = t * Math.PI * 2;
+      const point = new THREE.Vector3(
+        firstPoint.x + Math.cos(angle) * radius,
+        firstPoint.y + Math.sin(angle) * radius,
+        safeZ + (targetDepth - safeZ) * t
+      );
+      segments.push(buildSegment(prev, point, plungeSpeed, "entry"));
+      prev = point;
+    }
+    return prev;
+  }
+
+  if (entryType === "ramp" && job.points.length >= 2) {
+    const nextPoint = job.points[1];
+    const rampTarget = new THREE.Vector3(Number(nextPoint.x), Number(nextPoint.y), targetDepth);
+    segments.push(buildSegment(currentPoint, rampTarget, feedSpeed, "entry"));
+    return rampTarget;
+  }
+
+  const plungeTarget = new THREE.Vector3(firstPoint.x, firstPoint.y, targetDepth);
+  segments.push(buildSegment(currentPoint, plungeTarget, plungeSpeed, "plunge"));
+  return plungeTarget;
+}
+
+function buildCutSegments(plan, sheet, cutConfig) {
+  const segments = [];
+  const rapidSpeed = Math.max(Number(cutConfig.feed || 1200) * 2.5, 3000);
+  const safeZ = Number(cutConfig.safeZ || 8);
+  let currentPoint = new THREE.Vector3(
+    Number(sheet.originX || 0) + Number(cutConfig.startX || 0),
+    Number(sheet.originY || 0) + Number(cutConfig.startY || 0),
+    safeZ
+  );
+
+  for (const job of plan.jobs) {
+    if (!Array.isArray(job.points) || job.points.length < 2) continue;
+    const firstPoint = job.points[0];
+    const finalDepth = -Math.max(0.1, Number(cutConfig.finalDepth || DEFAULT_PART_THICKNESS));
+    const stepDown = Math.max(0.1, Number(cutConfig.stepDown || 1));
+    const passDepths = [];
+    for (let depth = -stepDown; depth > finalDepth; depth -= stepDown) passDepths.push(depth);
+    passDepths.push(finalDepth);
+
+    const rapidTarget = new THREE.Vector3(firstPoint.x, firstPoint.y, safeZ);
+    segments.push(buildSegment(currentPoint, rapidTarget, rapidSpeed, "rapid"));
+    currentPoint = rapidTarget;
+
+    for (let passIndex = 0; passIndex < passDepths.length; passIndex += 1) {
+      const targetDepth = passDepths[passIndex];
+      currentPoint = appendEntrySegments(segments, currentPoint, firstPoint, targetDepth, cutConfig, job);
+      for (let idx = 1; idx < job.points.length; idx += 1) {
+        const point = job.points[idx];
+        const target = new THREE.Vector3(point.x, point.y, targetDepth);
+        segments.push(buildSegment(currentPoint, target, Number(cutConfig.feed || 1200), "cut"));
+        currentPoint = target;
+      }
+      if (job.closed) {
+        const target = new THREE.Vector3(firstPoint.x, firstPoint.y, targetDepth);
+        segments.push(buildSegment(currentPoint, target, Number(cutConfig.feed || 1200), "cut"));
+        currentPoint = target;
+      }
+      const retractTarget = new THREE.Vector3(currentPoint.x, currentPoint.y, safeZ);
+      segments.push(buildSegment(currentPoint, retractTarget, Number(cutConfig.plunge || 200), "retract"));
+      currentPoint = retractTarget;
+    }
+  }
+
+  return segments;
+}
+
+function buildCutPlanForSheet(sheetIndex, { force = false } = {}) {
+  const idx = getValidSheetIndex(sheetIndex);
+  if (idx < 0) return null;
+  const sheet = ensureSheetCutState(sheetState[idx]);
+  if (!sheet) return null;
+  const cutConfig = getSheetCutConfig(idx);
+  const startCorner = getSheetCutStartCorner(idx);
+  const parts = partsGroup.children.filter((part) => getValidSheetIndex(part.userData?.sheetIndex) === idx);
+  const cacheKey = buildCutPlanCacheKey(idx, cutConfig, startCorner, parts);
+  const cached = cutState.planCache.get(idx);
+  if (!force && cached?.key === cacheKey) return cached.plan;
+
+  const anchor = buildSheetCutAnchor(sheet, startCorner);
+  const dedupe = new Set();
+  const jobs = [];
+  for (const part of parts) {
+    for (const job of buildCutJobsForPart(part, cutConfig, anchor)) {
+      const signature = `${job.category}:${buildCanonicalPathSignature(job.points, job.closed)}`;
+      if (!signature || dedupe.has(signature)) continue;
+      dedupe.add(signature);
+      jobs.push(job);
+    }
+  }
+
+  jobs.sort((a, b) => {
+    if (a.priority !== b.priority) return a.priority - b.priority;
+    const distA = anchor.distanceTo(a.points[0]);
+    const distB = anchor.distanceTo(b.points[0]);
+    if (Math.abs(distA - distB) > EPS) return distA - distB;
+    return String(a.code).localeCompare(String(b.code), "pt-BR", { numeric: true });
+  });
+
+  const segments = buildCutSegments({ jobs }, sheet, cutConfig);
+  const totalDurationMs = segments.reduce((sum, segment) => sum + Number(segment.durationMs || 0), 0);
+  const totalDistance = segments.reduce((sum, segment) => sum + Number(segment.distance || 0), 0);
+  const plan = {
+    sheetIndex: idx,
+    sheet,
+    cutConfig,
+    startCorner,
+    anchor,
+    jobs,
+    segments,
+    totalDurationMs,
+    totalDistance
+  };
+  cutState.planCache.set(idx, { key: cacheKey, plan });
+  return plan;
+}
+
+function formatDurationMs(ms) {
+  const totalSeconds = Math.max(0, Math.round(Number(ms || 0) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function updateSimCutInfo() {
+  if (!simCutInfoEl) return;
+  if (!simState.cutPlan) {
+    simCutInfoEl.textContent = "Pronto para simular.";
+    return;
+  }
+  const progress = simState.durationMs > 0 ? (simState.elapsedMs / simState.durationMs) * 100 : 0;
+  const modeLabel = simState.cutPlan.cutConfig.mode === "outside"
+    ? "Fora"
+    : simState.cutPlan.cutConfig.mode === "inside"
+      ? "Dentro"
+      : "Sobre a linha";
+  const stateLabel = simState.paused ? "Pausado" : simState.running ? "Rodando" : "Pronto";
+  simCutInfoEl.textContent =
+    `${stateLabel} ${progress.toFixed(1)}% | Modo: ${modeLabel} | Tempo: ${formatDurationMs(simState.durationMs)}`;
+}
+
+function disposeSimulationVisuals() {
+  if (simState.pathLine?.parent) simState.pathLine.parent.remove(simState.pathLine);
+  if (simState.pathLine?.geometry) simState.pathLine.geometry.dispose();
+  if (simState.pathLine?.material) simState.pathLine.material.dispose();
+  simState.pathLine = null;
+
+  if (simState.toolMesh?.parent) simState.toolMesh.parent.remove(simState.toolMesh);
+  if (simState.toolMesh) disposeObject3D(simState.toolMesh);
+  simState.toolMesh = null;
+}
+
+function buildToolMesh(cutConfig) {
+  const toolType = String(cutConfig?.toolType || "straight");
+  const measure = Math.max(1, Number(cutConfig?.toolMeasure || 6));
+  const toolHeight = Math.max(36, measure * 7);
+  const bodyRadius = Math.max(1.2, toolType === "vbit" ? 4 : measure * 0.5);
+  const group = new THREE.Group();
+
+  const body = new THREE.Mesh(
+    new THREE.CylinderGeometry(bodyRadius, bodyRadius, toolHeight, 18, 1, false),
+    new THREE.MeshStandardMaterial({
+      color: 0xf59e0b,
+      emissive: 0x2a1600,
+      metalness: 0.3,
+      roughness: 0.45,
+      transparent: true,
+      opacity: 0.92
+    })
+  );
+  body.rotation.x = Math.PI * 0.5;
+  body.position.z = toolHeight * 0.5;
+  group.add(body);
+
+  let tipGeometry = null;
+  if (toolType === "ballnose") {
+    tipGeometry = new THREE.SphereGeometry(bodyRadius, 18, 12, 0, Math.PI * 2, 0, Math.PI * 0.5);
+  } else if (toolType === "vbit" || toolType === "drill") {
+    tipGeometry = new THREE.ConeGeometry(bodyRadius * 1.15, Math.max(10, measure * 2), 18, 1);
+  } else {
+    tipGeometry = new THREE.CylinderGeometry(bodyRadius * 0.95, bodyRadius * 0.95, Math.max(8, measure * 1.6), 18);
+  }
+  const tip = new THREE.Mesh(
+    tipGeometry,
+    new THREE.MeshStandardMaterial({
+      color: 0xfde68a,
+      emissive: 0x2f2500,
+      metalness: 0.2,
+      roughness: 0.4,
+      transparent: true,
+      opacity: 0.95
+    })
+  );
+  tip.rotation.x = Math.PI * 0.5;
+  group.add(tip);
+
+  group.name = "__cutToolSimulation";
+  return group;
+}
+
+function ensureSimulationVisuals(cutPlan) {
+  disposeSimulationVisuals();
+  const positions = [];
+  for (const segment of cutPlan.segments) {
+    positions.push(segment.to.x, segment.to.y, Number(cutPlan.sheet.originZ || 0) + segment.to.z);
+  }
+  if (positions.length >= 3) {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    const material = new THREE.LineBasicMaterial({
+      color: 0xf97316,
+      transparent: true,
+      opacity: 0.72,
+      toneMapped: false
+    });
+    simState.pathLine = new THREE.Line(geometry, material);
+    scene.add(simState.pathLine);
+  }
+
+  simState.toolMesh = buildToolMesh(cutPlan.cutConfig);
+  scene.add(simState.toolMesh);
+}
+
+function applySimulationPoint(point) {
+  if (!simState.toolMesh || !simState.cutPlan) return;
+  simState.toolMesh.position.set(
+    point.x,
+    point.y,
+    Number(simState.cutPlan.sheet.originZ || 0) + point.z
+  );
+}
+
+function stopCutSimulation({ keepModal = false } = {}) {
+  simState.open = false;
+  simState.running = false;
+  simState.paused = false;
+  simState.cutPlan = null;
+  simState.elapsedMs = 0;
+  simState.durationMs = 0;
+  simState.segments = [];
+  simState.segIndex = 0;
+  simState.lastTs = 0;
+  disposeSimulationVisuals();
+  updateSimCutInfo();
+  if (simPauseBtn) simPauseBtn.textContent = "Pausar";
+  if (!keepModal) closeCutSimulationModal();
+}
+
+function startCutSimulationForSheet(sheetIndex = activeSheetIndex, { restart = false } = {}) {
+  const cutPlan = buildCutPlanForSheet(sheetIndex, { force: restart });
+  if (!cutPlan || cutPlan.jobs.length === 0 || cutPlan.segments.length === 0) {
+    stopCutSimulation({ keepModal: false });
+    alert("Nenhum caminho de corte disponível na chapa ativa.");
+    return false;
+  }
+
+  simState.cutPlan = cutPlan;
+  simState.currentSheetIndex = cutPlan.sheetIndex;
+  simState.segments = cutPlan.segments.map((segment) => ({ ...segment, _progress: 0 }));
+  simState.durationMs = cutPlan.totalDurationMs;
+  simState.elapsedMs = 0;
+  simState.segIndex = 0;
+  simState.lastTs = 0;
+  simState.running = true;
+  simState.paused = false;
+  simState.open = true;
+  if (simPauseBtn) simPauseBtn.textContent = "Pausar";
+  if (simSpeedChipEl) simSpeedChipEl.textContent = `x${simState.speed.toFixed(2)}`;
+  openCutSimulationModal();
+  ensureSimulationVisuals(cutPlan);
+  const firstSegment = simState.segments[0];
+  applySimulationPoint(firstSegment.from);
+  updateSimCutInfo();
+  return true;
+}
+
+function toggleCutSimulationPause() {
+  if (!simState.running) return;
+  simState.paused = !simState.paused;
+  if (simPauseBtn) simPauseBtn.textContent = simState.paused ? "Continuar" : "Pausar";
+  updateSimCutInfo();
+}
+
+function restartCutSimulation() {
+  if (simState.currentSheetIndex < 0) return;
+  startCutSimulationForSheet(simState.currentSheetIndex, { restart: true });
+}
+
+function changeCutSimulationSpeed(multiplier) {
+  simState.speed = THREE.MathUtils.clamp(Number(simState.speed || 1) * Number(multiplier || 1), 0.25, 8);
+  if (simSpeedChipEl) simSpeedChipEl.textContent = `x${simState.speed.toFixed(2)}`;
+  updateSimCutInfo();
+}
+
+function updateCutSimulation(now) {
+  if (!simState.running || simState.paused || !simState.cutPlan || simState.segments.length === 0) return;
+  if (!Number.isFinite(simState.lastTs) || simState.lastTs <= 0) {
+    simState.lastTs = Number(now || performance.now());
+    return;
+  }
+
+  let deltaMs = Math.max(0, Number(now || performance.now()) - simState.lastTs) * Number(simState.speed || 1);
+  simState.lastTs = Number(now || performance.now());
+
+  while (deltaMs > 0 && simState.segIndex < simState.segments.length) {
+    const segment = simState.segments[simState.segIndex];
+    const remaining = Math.max(1, Number(segment.durationMs || 1));
+    const consume = Math.min(remaining - Number(segment._progress || 0), deltaMs);
+    segment._progress = Number(segment._progress || 0) + consume;
+    const nextRatio = THREE.MathUtils.clamp(segment._progress / remaining, 0, 1);
+    const point = segment.from.clone().lerp(segment.to, nextRatio);
+    applySimulationPoint(point);
+    deltaMs -= consume;
+    simState.elapsedMs = Math.min(simState.durationMs, simState.elapsedMs + consume);
+    if (nextRatio >= 1) simState.segIndex += 1;
+    else break;
+  }
+
+  if (simState.segIndex >= simState.segments.length) {
+    simState.running = false;
+    simState.paused = false;
+    if (simPauseBtn) simPauseBtn.textContent = "Pausar";
+    if (simState.segments.length > 0) {
+      const last = simState.segments[simState.segments.length - 1];
+      applySimulationPoint(last.to);
+    }
+  }
+  updateSimCutInfo();
+}
+
+function buildNcComment(post, text) {
+  const message = String(text || "").replace(/[()]/g, " ");
+  if (post === "grbl") return `; ${message}`;
+  return `(${message})`;
+}
+
+function buildNcContentForPlan(plan, sheetNumber, fileName) {
+  const { cutConfig, sheet, segments } = plan;
+  const lines = [];
+  lines.push(buildNcComment(cutConfig.post, `Router CNC | Chapa ${sheetNumber}`));
+  lines.push(buildNcComment(cutConfig.post, `Arquivo ${fileName}`));
+  lines.push("G90");
+  lines.push("G21");
+  lines.push("G17");
+  lines.push(`S${Math.round(Number(cutConfig.rpm || 0))} M3`);
+  lines.push(`G0 Z${Number(cutConfig.safeZ || 8).toFixed(3)}`);
+  for (const segment of segments) {
+    const x = segment.to.x - Number(sheet.originX || 0);
+    const y = segment.to.y - Number(sheet.originY || 0);
+    const z = segment.to.z;
+    if (segment.kind === "rapid" || segment.kind === "retract") {
+      lines.push(`G0 X${x.toFixed(3)} Y${y.toFixed(3)} Z${z.toFixed(3)}`);
+    } else {
+      const feed = segment.kind === "plunge"
+        ? Number(cutConfig.plunge || 200)
+        : Number(cutConfig.feed || 1200);
+      lines.push(`G1 X${x.toFixed(3)} Y${y.toFixed(3)} Z${z.toFixed(3)} F${feed.toFixed(1)}`);
+    }
+  }
+  lines.push(`G0 Z${Number(cutConfig.safeZ || 8).toFixed(3)}`);
+  lines.push("M5");
+  lines.push("M30");
+  return `${lines.join("\n")}\n`;
+}
+
+function buildTimestampBaseName(now = new Date()) {
+  const day = String(now.getDate()).padStart(2, "0");
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const hours = String(now.getHours()).padStart(2, "0");
+  const minutes = String(now.getMinutes()).padStart(2, "0");
+  return `${day}${month}-${hours}${minutes}`;
+}
+
+async function postJson(url, payload) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload || {})
+  });
+  if (!response.ok) throw new Error(`Falha em ${url} (HTTP ${response.status})`);
+  return response.json().catch(() => ({}));
+}
+
+function buildProjectSnapshot() {
+  return {
+    version: "1.0.1",
+    savedAt: new Date().toISOString(),
+    projectFileName: String(projectFileName || ""),
+    activeSheetIndex: getValidSheetIndex(activeSheetIndex),
+    sheetCreationTemplate: getSheetCreationTemplate(),
+    cutDefaultConfig: cloneCutConfig(getDefaultSheetCutConfig()),
+    sheets: sheetState.map((sheet) => {
+      const hydrated = ensureSheetCutState(sheet);
+      return {
+        width: hydrated.width,
+        height: hydrated.height,
+        thickness: hydrated.thickness,
+        marginTop: hydrated.marginTop,
+        marginBottom: hydrated.marginBottom,
+        marginLeft: hydrated.marginLeft,
+        marginRight: hydrated.marginRight,
+        spacing: hydrated.spacing,
+        originX: hydrated.originX,
+        originY: hydrated.originY,
+        originZ: hydrated.originZ,
+        cutSettings: cloneCutConfig(hydrated.cutSettings),
+        cutStartCorner: normalizeCutStartCorner(hydrated.cutStartCorner)
+      };
+    }),
+    inventory: inventoryItems.map((item) => ({
+      id: Number(item.id || 0),
+      code: String(item.code || ""),
+      fileName: String(item.fileName || ""),
+      sourceType: String(item.sourceType || ""),
+      width: Number(item.width || 0),
+      height: Number(item.height || 0),
+      quantity: Number(item.quantity || 0),
+      sourceThickness: Number(item.sourceThickness || 0),
+      dxfText: String(item.dxfText || ""),
+      stepText: String(item.stepText || ""),
+      preParsed: item.preParsed || null
+    })),
+    parts: partsGroup.children.map((part) => ({
+      name: String(part.name || ""),
+      code: getPartCode(part),
+      sourceType: inferPartSourceType(part),
+      sheetIndex: getValidSheetIndex(part.userData?.sheetIndex),
+      position: {
+        x: Number(part.position?.x || 0),
+        y: Number(part.position?.y || 0),
+        z: Number(part.position?.z || 0)
+      },
+      rotationZ: Number(part.rotation?.z || 0),
+      scale: {
+        x: Number(part.scale?.x || 1),
+        y: Number(part.scale?.y || 1),
+        z: Number(part.scale?.z || 1)
+      },
+      cutContours: cloneCutContours(part.userData?.cutContours),
+      selectionPrimaryLoop: serializeSelectionPrimaryLoop(part.userData?.selectionPrimaryLoop)
+    }))
+  };
+}
+
+async function saveProjectFile(baseName = "", silent = false) {
+  const nextBase = String(baseName || buildTimestampBaseName()).trim() || buildTimestampBaseName();
+  const nextFileName = `${nextBase}-.CNC3D`;
+  const payload = await postJson("/api/save-project", {
+    filename: nextFileName,
+    payload: buildProjectSnapshot()
+  });
+  if (!payload?.ok) throw new Error(String(payload?.error || "Falha ao salvar projeto."));
+  projectFileName = String(payload.filename || nextFileName);
+  updateProjectInfoBadge();
+  persistCutState();
+  if (!silent) alert(`Projeto salvo em ${payload.path || payload.filename}.`);
+  return payload;
+}
+
+async function exportCutPlansToNc() {
+  const targetSheets = sheetState
+    .map((sheet, idx) => ({ idx, count: piecesInSheet(idx) }))
+    .filter((entry) => entry.count > 0)
+    .map((entry) => entry.idx);
+  if (targetSheets.length === 0) {
+    alert("Nao ha chapas com pecas para exportar.");
+    return;
+  }
+  const baseName = buildTimestampBaseName();
+  let exportedCount = 0;
+  for (let order = 0; order < targetSheets.length; order += 1) {
+    const sheetIndex = targetSheets[order];
+    const plan = buildCutPlanForSheet(sheetIndex, { force: true });
+    if (!plan || plan.jobs.length === 0) continue;
+    const fileName = `${baseName}-${order + 1}.NC`;
+    const content = buildNcContentForPlan(plan, sheetIndex + 1, fileName);
+    const response = await postJson("/api/save-text", {
+      filename: fileName,
+      content,
+      default_ext: ".NC"
+    });
+    if (!response?.ok) throw new Error(String(response?.error || `Falha ao exportar ${fileName}.`));
+    exportedCount += 1;
+  }
+  if (exportedCount < 1) {
+    alert("Nenhum arquivo .NC foi gerado.");
+    return;
+  }
+  alert(`${exportedCount} arquivo(s) .NC gerado(s) na pasta runtime.`);
+}
 
 // ---------------------------
 // DXF -> 3D mesh
@@ -3838,6 +5258,14 @@ function importWithCncContours(dxfText, filename, thickness, material, localGrou
   }
   if (!parsed || !Array.isArray(parsed.contours) || parsed.contours.length < 1) return false;
   if (!(Number(parsed.width) > EPS && Number(parsed.height) > EPS)) return false;
+  applyGroupCutMetadata(localGroup, {
+    sourceType: PART_KIND_DXF,
+    partCode: extractPartCodeFromName(filename),
+    fileName: filename,
+    width: Number(parsed.width || 0),
+    height: Number(parsed.height || 0),
+    cutContours: parsed.contours
+  });
 
   const closedLoops = [];
   const declaredClosedLoops = [];
@@ -4406,15 +5834,16 @@ const fileInput = document.getElementById("fileInput");
 const stepInput = document.getElementById("stepInput");
 const fitBtn = document.getElementById("fitBtn");
 const clearBtn = document.getElementById("clearBtn");
+const editCutBtn = document.getElementById("editCutBtn");
 const batchTimeEl = document.getElementById("batchTime");
 const runtimeModeEl = document.getElementById("runtimeMode");
 const cacheStatsEl = document.getElementById("cacheStats");
 const selectedPieceEl = document.getElementById("selectedPiece");
+const projectInfoEl = document.getElementById("projectInfo");
 const sheetInfoEl = document.getElementById("sheetInfo");
 const sheetListEl = document.getElementById("sheetList");
 const newSheetBtn = document.getElementById("newSheetBtn");
 const editSheetBtn = document.getElementById("editSheetBtn");
-const moveToSheetBtn = document.getElementById("moveToSheetBtn");
 const sheetEditModalEl = document.getElementById("sheetEditModal");
 const applySheetBtn = document.getElementById("applySheetBtn");
 const applyAllSheetsBtn = document.getElementById("applyAllSheetsBtn");
@@ -4433,6 +5862,348 @@ const inventoryTypeFilterEl = document.getElementById("inventoryTypeFilter");
 const mountActiveSheetBtn = document.getElementById("mountActiveSheetBtn");
 const mountAllSheetsBtn = document.getElementById("mountAllSheetsBtn");
 const fpsBadgeEl = document.getElementById("fpsBadge");
+const cutEditModalEl = document.getElementById("cutEditModal");
+const cutEditCardEl = document.getElementById("cutEditCard");
+const cutEditDragHandleEl = document.getElementById("cutEditDragHandle");
+const cutToolTypeSelectEl = document.getElementById("cutToolTypeSelect");
+const cutToolMeasureSelectEl = document.getElementById("cutToolMeasureSelect");
+const cutToolSelectEl = document.getElementById("cutToolSelect");
+const cutToolNameInputEl = document.getElementById("cutToolNameInput");
+const cutPostSelectEl = document.getElementById("cutPostSelect");
+const cutModeSelectEl = document.getElementById("cutModeSelect");
+const cutRpmInputEl = document.getElementById("cutRpmInput");
+const cutFeedInputEl = document.getElementById("cutFeedInput");
+const cutPlungeInputEl = document.getElementById("cutPlungeInput");
+const cutStepDownInputEl = document.getElementById("cutStepDownInput");
+const cutFinalDepthInputEl = document.getElementById("cutFinalDepthInput");
+const cutStepOverInputEl = document.getElementById("cutStepOverInput");
+const cutSafeZInputEl = document.getElementById("cutSafeZInput");
+const cutStartXInputEl = document.getElementById("cutStartXInput");
+const cutStartYInputEl = document.getElementById("cutStartYInput");
+const cutEntryTypeSelectEl = document.getElementById("cutEntryTypeSelect");
+const cutToolAddBtn = document.getElementById("cutToolAddBtn");
+const cutToolSaveBtn = document.getElementById("cutToolSaveBtn");
+const cutToolDeleteBtn = document.getElementById("cutToolDeleteBtn");
+const cutApplyCurrentBtn = document.getElementById("cutApplyCurrentBtn");
+const cutApplyAllBtn = document.getElementById("cutApplyAllBtn");
+const simulateCutBtn = document.getElementById("simulateCutBtn");
+const exportNcBtn = document.getElementById("exportNcBtn");
+const closeCutModalBtn = document.getElementById("closeCutModalBtn");
+const simCutModalEl = document.getElementById("simCutModal");
+const simCutCardEl = document.getElementById("simCutCard");
+const simCutDragHandleEl = document.getElementById("simCutDragHandle");
+const simCutInfoEl = document.getElementById("simCutInfo");
+const simSpeedChipEl = document.getElementById("simSpeedChip");
+const simSlowBtn = document.getElementById("simSlowBtn");
+const simFastBtn = document.getElementById("simFastBtn");
+const simPauseBtn = document.getElementById("simPauseBtn");
+const simRestartBtn = document.getElementById("simRestartBtn");
+const simCloseBtn = document.getElementById("simCloseBtn");
+
+function updateProjectInfoBadge() {
+  if (!projectInfoEl) return;
+  projectInfoEl.textContent = `Projeto: ${String(projectFileName || "").trim() || "-"}`;
+}
+
+function resetFloatingCardPosition(cardEl, topPx = 72) {
+  if (!cardEl) return;
+  cardEl.style.position = "fixed";
+  cardEl.style.left = "50%";
+  cardEl.style.top = `${topPx}px`;
+  cardEl.style.transform = "translateX(-50%)";
+}
+
+function beginFloatingDrag(event, dragState, cardEl) {
+  if (!event || !dragState || !cardEl) return;
+  dragState.active = true;
+  dragState.pointerId = Number(event.pointerId ?? -1);
+  dragState.startX = Number(event.clientX || 0);
+  dragState.startY = Number(event.clientY || 0);
+  const rect = cardEl.getBoundingClientRect();
+  dragState.baseX = rect.left;
+  dragState.baseY = rect.top;
+  cardEl.style.position = "fixed";
+  cardEl.style.left = `${rect.left}px`;
+  cardEl.style.top = `${rect.top}px`;
+  cardEl.style.transform = "none";
+  if (event.target && typeof event.target.setPointerCapture === "function" && dragState.pointerId >= 0) {
+    try { event.target.setPointerCapture(dragState.pointerId); } catch (_error) {}
+  }
+}
+
+function moveFloatingDrag(event, dragState, cardEl) {
+  if (!dragState?.active || !cardEl) return false;
+  const nextLeft = dragState.baseX + (Number(event.clientX || 0) - dragState.startX);
+  const nextTop = dragState.baseY + (Number(event.clientY || 0) - dragState.startY);
+  const maxLeft = Math.max(8, window.innerWidth - cardEl.offsetWidth - 8);
+  const maxTop = Math.max(8, window.innerHeight - cardEl.offsetHeight - 8);
+  cardEl.style.left = `${THREE.MathUtils.clamp(nextLeft, 8, maxLeft)}px`;
+  cardEl.style.top = `${THREE.MathUtils.clamp(nextTop, 8, maxTop)}px`;
+  return true;
+}
+
+function endFloatingDrag(event, dragState) {
+  if (!dragState) return;
+  const pointerId = Number(dragState.pointerId);
+  dragState.active = false;
+  dragState.pointerId = -1;
+  if (event?.target && typeof event.target.releasePointerCapture === "function" && pointerId >= 0) {
+    try { event.target.releasePointerCapture(pointerId); } catch (_error) {}
+  }
+}
+
+function setSelectOptions(selectEl, options, selectedValue = "") {
+  if (!(selectEl instanceof HTMLSelectElement)) return;
+  const selected = String(selectedValue || "");
+  selectEl.innerHTML = "";
+  for (const option of options) {
+    const el = document.createElement("option");
+    el.value = String(option.value);
+    el.textContent = String(option.label);
+    if (String(option.value) === selected) el.selected = true;
+    selectEl.appendChild(el);
+  }
+  if (!options.some((entry) => String(entry.value) === selected) && options.length > 0) {
+    selectEl.value = String(options[0].value);
+  }
+}
+
+function getCutToolsForSelection(typeKey = cutState.selectedToolType, measure = cutState.selectedToolMeasure) {
+  const type = findCutToolType(typeKey);
+  const numericMeasure = Number(measure || type.measures[0] || 6);
+  return cutState.tools.filter((tool) => tool.typeKey === type.key && Number(tool.measure) === numericMeasure);
+}
+
+function getCutToolFromForm() {
+  const selectedToolId = String(cutToolSelectEl?.value || cutState.selectedToolId || "");
+  return getCutToolById(selectedToolId);
+}
+
+function fillCutFieldsFromTool(tool) {
+  if (!tool) return;
+  if (cutToolNameInputEl) cutToolNameInputEl.value = String(tool.name || "");
+  if (cutRpmInputEl) cutRpmInputEl.value = String(tool.rpm);
+  if (cutFeedInputEl) cutFeedInputEl.value = String(tool.feed);
+  if (cutPlungeInputEl) cutPlungeInputEl.value = String(tool.plunge);
+  if (cutStepDownInputEl) cutStepDownInputEl.value = String(tool.stepDown);
+  if (cutFinalDepthInputEl) cutFinalDepthInputEl.value = String(tool.finalDepth);
+  if (cutStepOverInputEl) cutStepOverInputEl.value = String(tool.stepOver);
+  if (cutSafeZInputEl) cutSafeZInputEl.value = String(tool.safeZ);
+  if (cutEntryTypeSelectEl) cutEntryTypeSelectEl.value = String(tool.entryType || "ramp");
+}
+
+function readCutToolFromForm() {
+  const type = findCutToolType(cutToolTypeSelectEl?.value || cutState.selectedToolType);
+  const measure = Number(cutToolMeasureSelectEl?.value || cutState.selectedToolMeasure || type.measures[0] || 6);
+  return normalizeCutToolPreset({
+    id: getCutToolFromForm()?.id || buildCutToolId(type.key, measure),
+    typeKey: type.key,
+    measure,
+    name: String(cutToolNameInputEl?.value || buildCutToolName(type.key, measure)).trim(),
+    rpm: Number(cutRpmInputEl?.value),
+    feed: Number(cutFeedInputEl?.value),
+    plunge: Number(cutPlungeInputEl?.value),
+    stepDown: Number(cutStepDownInputEl?.value),
+    finalDepth: Number(cutFinalDepthInputEl?.value),
+    stepOver: Number(cutStepOverInputEl?.value),
+    safeZ: Number(cutSafeZInputEl?.value),
+    entryType: String(cutEntryTypeSelectEl?.value || "ramp")
+  });
+}
+
+function buildCutConfigFromForm() {
+  const tool = readCutToolFromForm();
+  return cloneCutConfig({
+    toolId: tool.id,
+    toolType: tool.typeKey,
+    toolMeasure: tool.measure,
+    toolName: tool.name,
+    post: String(cutPostSelectEl?.value || "nc_generic"),
+    mode: String(cutModeSelectEl?.value || "outside"),
+    rpm: tool.rpm,
+    feed: tool.feed,
+    plunge: tool.plunge,
+    stepDown: tool.stepDown,
+    finalDepth: Number(cutFinalDepthInputEl?.value || tool.finalDepth),
+    stepOver: Number(cutStepOverInputEl?.value || tool.stepOver),
+    safeZ: Number(cutSafeZInputEl?.value || tool.safeZ),
+    startX: Number(cutStartXInputEl?.value || 0),
+    startY: Number(cutStartYInputEl?.value || 0),
+    entryType: String(cutEntryTypeSelectEl?.value || tool.entryType || "ramp")
+  });
+}
+
+function fillCutEditorForm(config) {
+  const normalized = cloneCutConfig(config);
+  const type = findCutToolType(normalized.toolType);
+  cutState.selectedToolType = type.key;
+  cutState.selectedToolMeasure = Number(normalized.toolMeasure || type.measures[0] || 6);
+  refreshCutTypeMeasureSelects();
+  refreshCutToolSelect(normalized.toolId);
+  const tool = getCutToolById(normalized.toolId) || normalizeCutToolPreset({
+    typeKey: normalized.toolType,
+    measure: normalized.toolMeasure,
+    name: normalized.toolName,
+    rpm: normalized.rpm,
+    feed: normalized.feed,
+    plunge: normalized.plunge,
+    stepDown: normalized.stepDown,
+    finalDepth: normalized.finalDepth,
+    stepOver: normalized.stepOver,
+    safeZ: normalized.safeZ,
+    entryType: normalized.entryType
+  });
+  fillCutFieldsFromTool(tool);
+  if (cutToolNameInputEl) cutToolNameInputEl.value = String(normalized.toolName || tool.name || "");
+  if (cutPostSelectEl) cutPostSelectEl.value = String(normalized.post || "nc_generic");
+  if (cutModeSelectEl) cutModeSelectEl.value = String(normalized.mode || "outside");
+  if (cutRpmInputEl) cutRpmInputEl.value = String(normalized.rpm);
+  if (cutFeedInputEl) cutFeedInputEl.value = String(normalized.feed);
+  if (cutPlungeInputEl) cutPlungeInputEl.value = String(normalized.plunge);
+  if (cutStepDownInputEl) cutStepDownInputEl.value = String(normalized.stepDown);
+  if (cutFinalDepthInputEl) cutFinalDepthInputEl.value = String(normalized.finalDepth);
+  if (cutStepOverInputEl) cutStepOverInputEl.value = String(normalized.stepOver);
+  if (cutSafeZInputEl) cutSafeZInputEl.value = String(normalized.safeZ);
+  if (cutStartXInputEl) cutStartXInputEl.value = String(normalized.startX);
+  if (cutStartYInputEl) cutStartYInputEl.value = String(normalized.startY);
+  if (cutEntryTypeSelectEl) cutEntryTypeSelectEl.value = String(normalized.entryType || "ramp");
+}
+
+function refreshCutTypeMeasureSelects() {
+  if (!cutToolTypeSelectEl || !cutToolMeasureSelectEl) return;
+  setSelectOptions(cutToolTypeSelectEl, CUT_TOOL_TYPES.map((type) => ({
+    value: type.key,
+    label: type.label
+  })), cutState.selectedToolType);
+  const type = findCutToolType(cutToolTypeSelectEl.value || cutState.selectedToolType);
+  cutState.selectedToolType = type.key;
+  const measureOptions = type.measures.map((measure) => ({
+    value: String(measure),
+    label: formatCutMeasureLabel(type.key, measure)
+  }));
+  const hasCurrentMeasure = type.measures.includes(Number(cutState.selectedToolMeasure));
+  if (!hasCurrentMeasure) cutState.selectedToolMeasure = Number(type.measures[0] || 6);
+  setSelectOptions(cutToolMeasureSelectEl, measureOptions, String(cutState.selectedToolMeasure));
+  cutState.selectedToolMeasure = Number(cutToolMeasureSelectEl.value || cutState.selectedToolMeasure || type.measures[0] || 6);
+}
+
+function refreshCutToolSelect(preferredToolId = "") {
+  if (!cutToolSelectEl) return;
+  const tools = getCutToolsForSelection();
+  if (tools.length === 0) {
+    const generated = normalizeCutToolPreset({
+      typeKey: cutState.selectedToolType,
+      measure: cutState.selectedToolMeasure
+    }, { builtin: true });
+    cutState.tools.push(generated);
+  }
+  const refreshedTools = getCutToolsForSelection();
+  const selectedId = String(preferredToolId || cutState.selectedToolId || refreshedTools[0]?.id || "");
+  setSelectOptions(cutToolSelectEl, refreshedTools.map((tool) => ({
+    value: tool.id,
+    label: `${tool.name}${tool.builtin ? "" : " (Custom)"}`
+  })), selectedId);
+  cutState.selectedToolId = String(cutToolSelectEl.value || selectedId || "");
+  const currentTool = getCutToolById(cutState.selectedToolId) || refreshedTools[0] || null;
+  if (currentTool) {
+    cutState.selectedToolId = currentTool.id;
+    cutToolSelectEl.value = currentTool.id;
+  }
+  if (cutToolDeleteBtn) cutToolDeleteBtn.disabled = !!currentTool?.builtin;
+}
+
+function syncCutEditorWithActiveSheet() {
+  const config = getSheetCutConfig(activeSheetIndex);
+  fillCutEditorForm(config);
+}
+
+function registerCustomToolFromForm() {
+  const tool = readCutToolFromForm();
+  const nextId = `custom:${cutState.toolIdCounter++}`;
+  const customTool = normalizeCutToolPreset({
+    ...tool,
+    id: nextId,
+    builtin: false
+  });
+  cutState.customTools.push(customTool);
+  syncCutToolCollection(cutState.customTools);
+  cutState.selectedToolId = customTool.id;
+  persistCutState();
+  refreshCutTypeMeasureSelects();
+  refreshCutToolSelect(customTool.id);
+  fillCutFieldsFromTool(customTool);
+  if (cutToolNameInputEl) cutToolNameInputEl.value = customTool.name;
+}
+
+function saveSelectedToolEdits() {
+  const currentTool = getCutToolFromForm();
+  if (!currentTool || currentTool.builtin) {
+    registerCustomToolFromForm();
+    return;
+  }
+  const editedTool = normalizeCutToolPreset({
+    ...readCutToolFromForm(),
+    id: currentTool.id,
+    builtin: false
+  });
+  const idx = cutState.customTools.findIndex((tool) => tool.id === currentTool.id);
+  if (idx >= 0) cutState.customTools[idx] = editedTool;
+  else cutState.customTools.push(editedTool);
+  syncCutToolCollection(cutState.customTools);
+  cutState.selectedToolId = editedTool.id;
+  persistCutState();
+  refreshCutTypeMeasureSelects();
+  refreshCutToolSelect(editedTool.id);
+  fillCutFieldsFromTool(editedTool);
+  if (cutToolNameInputEl) cutToolNameInputEl.value = editedTool.name;
+}
+
+function deleteSelectedCustomTool() {
+  const currentTool = getCutToolFromForm();
+  if (!currentTool || currentTool.builtin) return;
+  cutState.customTools = cutState.customTools.filter((tool) => tool.id !== currentTool.id);
+  syncCutToolCollection(cutState.customTools);
+  cutState.selectedToolId = buildCutToolId(cutState.selectedToolType, cutState.selectedToolMeasure);
+  persistCutState();
+  refreshCutTypeMeasureSelects();
+  refreshCutToolSelect(cutState.selectedToolId);
+  const nextTool = getCutToolById(cutState.selectedToolId) || getCutToolsForSelection()[0] || null;
+  if (nextTool) {
+    fillCutFieldsFromTool(nextTool);
+    if (cutToolNameInputEl) cutToolNameInputEl.value = nextTool.name;
+  }
+}
+
+function openCutEditorModal() {
+  if (!cutEditModalEl) return;
+  syncCutEditorWithActiveSheet();
+  cutEditModalEl.classList.remove("hidden");
+  resetFloatingCardPosition(cutEditCardEl, 74);
+}
+
+function closeCutEditorModal() {
+  if (!cutEditModalEl) return;
+  cutEditModalEl.classList.add("hidden");
+  endFloatingDrag(null, cutState.drag);
+}
+
+function openCutSimulationModal() {
+  if (!simCutModalEl) return;
+  simCutModalEl.classList.remove("hidden");
+  resetFloatingCardPosition(simCutCardEl, 86);
+}
+
+function closeCutSimulationModal() {
+  if (simCutModalEl) simCutModalEl.classList.add("hidden");
+  endFloatingDrag(null, simState.drag);
+}
+
+function initializeCutEditorState() {
+  loadCutStateFromStorage();
+  updateProjectInfoBadge();
+  refreshCutTypeMeasureSelects();
+  refreshCutToolSelect(buildCutToolId(cutState.selectedToolType, cutState.selectedToolMeasure));
+}
 
 if (runtimeModeEl) {
   runtimeModeEl.textContent = "Render: GPU (WebGL)";
@@ -5314,24 +7085,79 @@ if (editSheetBtn) {
   editSheetBtn.addEventListener("click", () => openSheetEditorModal());
 }
 
-if (moveToSheetBtn) {
-  moveToSheetBtn.addEventListener("click", () => {
-    if (!selectedPart) return;
-    const moved = assignPartToSheet(selectedPart, activeSheetIndex, {
-      allowCreateSheet: true,
-      searchAllSheets: false
-    });
-    if (moved) {
-      updateGlobalBounds();
-      updateSheetListUi();
-      updateSheetInfoBadge();
-    }
-  });
+if (editCutBtn) {
+  editCutBtn.addEventListener("click", () => openCutEditorModal());
 }
 
 if (sheetEditModalEl) {
   sheetEditModalEl.addEventListener("click", (event) => {
     if (event.target === sheetEditModalEl) closeSheetEditorModal();
+  });
+}
+
+if (cutEditModalEl) {
+  cutEditModalEl.addEventListener("click", (event) => {
+    if (event.target === cutEditModalEl) closeCutEditorModal();
+  });
+}
+
+if (cutEditDragHandleEl) {
+  cutEditDragHandleEl.addEventListener("pointerdown", (event) => beginFloatingDrag(event, cutState.drag, cutEditCardEl));
+  cutEditDragHandleEl.addEventListener("pointermove", (event) => moveFloatingDrag(event, cutState.drag, cutEditCardEl));
+  cutEditDragHandleEl.addEventListener("pointerup", (event) => endFloatingDrag(event, cutState.drag));
+  cutEditDragHandleEl.addEventListener("pointercancel", (event) => endFloatingDrag(event, cutState.drag));
+}
+
+if (simCutDragHandleEl) {
+  simCutDragHandleEl.addEventListener("pointerdown", (event) => beginFloatingDrag(event, simState.drag, simCutCardEl));
+  simCutDragHandleEl.addEventListener("pointermove", (event) => moveFloatingDrag(event, simState.drag, simCutCardEl));
+  simCutDragHandleEl.addEventListener("pointerup", (event) => endFloatingDrag(event, simState.drag));
+  simCutDragHandleEl.addEventListener("pointercancel", (event) => endFloatingDrag(event, simState.drag));
+}
+
+if (cutToolTypeSelectEl) {
+  cutToolTypeSelectEl.addEventListener("change", () => {
+    cutState.selectedToolType = String(cutToolTypeSelectEl.value || "straight");
+    refreshCutTypeMeasureSelects();
+    refreshCutToolSelect(buildCutToolId(cutState.selectedToolType, cutState.selectedToolMeasure));
+    const tool = getCutToolById(cutToolSelectEl?.value) || getCutToolsForSelection()[0] || null;
+    if (tool) fillCutFieldsFromTool(tool);
+  });
+}
+
+if (cutToolMeasureSelectEl) {
+  cutToolMeasureSelectEl.addEventListener("change", () => {
+    cutState.selectedToolMeasure = Number(cutToolMeasureSelectEl.value || 6);
+    refreshCutToolSelect(buildCutToolId(cutState.selectedToolType, cutState.selectedToolMeasure));
+    const tool = getCutToolById(cutToolSelectEl?.value) || getCutToolsForSelection()[0] || null;
+    if (tool) fillCutFieldsFromTool(tool);
+  });
+}
+
+if (cutToolSelectEl) {
+  cutToolSelectEl.addEventListener("change", () => {
+    cutState.selectedToolId = String(cutToolSelectEl.value || "");
+    const tool = getCutToolById(cutState.selectedToolId);
+    if (tool) fillCutFieldsFromTool(tool);
+    if (cutToolDeleteBtn) cutToolDeleteBtn.disabled = !!tool?.builtin;
+  });
+}
+
+if (cutToolAddBtn) {
+  cutToolAddBtn.addEventListener("click", () => {
+    registerCustomToolFromForm();
+  });
+}
+
+if (cutToolSaveBtn) {
+  cutToolSaveBtn.addEventListener("click", () => {
+    saveSelectedToolEdits();
+  });
+}
+
+if (cutToolDeleteBtn) {
+  cutToolDeleteBtn.addEventListener("click", () => {
+    deleteSelectedCustomTool();
   });
 }
 
@@ -5354,6 +7180,60 @@ if (applySheetBtn) {
     fitToScene(1.15);
   });
 }
+
+if (cutApplyCurrentBtn) {
+  cutApplyCurrentBtn.addEventListener("click", () => {
+    const sheetIndex = getValidSheetIndex(activeSheetIndex);
+    if (sheetIndex < 0) return;
+    setSheetCutConfig(sheetIndex, buildCutConfigFromForm());
+    persistCutState();
+  });
+}
+
+if (cutApplyAllBtn) {
+  cutApplyAllBtn.addEventListener("click", () => {
+    const config = buildCutConfigFromForm();
+    cutState.defaultSheetConfig = cloneCutConfig(config);
+    for (let idx = 0; idx < sheetState.length; idx += 1) {
+      setSheetCutConfig(idx, config);
+    }
+    persistCutState();
+  });
+}
+
+if (simulateCutBtn) {
+  simulateCutBtn.addEventListener("click", () => {
+    const sheetIndex = getValidSheetIndex(activeSheetIndex);
+    if (sheetIndex < 0) return;
+    setSheetCutConfig(sheetIndex, buildCutConfigFromForm());
+    persistCutState();
+    startCutSimulationForSheet(sheetIndex, { restart: true });
+  });
+}
+
+if (exportNcBtn) {
+  exportNcBtn.addEventListener("click", async () => {
+    try {
+      const sheetIndex = getValidSheetIndex(activeSheetIndex);
+      if (sheetIndex >= 0) setSheetCutConfig(sheetIndex, buildCutConfigFromForm());
+      persistCutState();
+      await exportCutPlansToNc();
+    } catch (error) {
+      console.error(error);
+      alert(String(error?.message || "Falha ao exportar .NC."));
+    }
+  });
+}
+
+if (closeCutModalBtn) {
+  closeCutModalBtn.addEventListener("click", () => closeCutEditorModal());
+}
+
+if (simFastBtn) simFastBtn.addEventListener("click", () => changeCutSimulationSpeed(2));
+if (simSlowBtn) simSlowBtn.addEventListener("click", () => changeCutSimulationSpeed(0.5));
+if (simPauseBtn) simPauseBtn.addEventListener("click", () => toggleCutSimulationPause());
+if (simRestartBtn) simRestartBtn.addEventListener("click", () => restartCutSimulation());
+if (simCloseBtn) simCloseBtn.addEventListener("click", () => stopCutSimulation());
 
 if (applyAllSheetsBtn) {
   applyAllSheetsBtn.addEventListener("click", () => {
@@ -5382,8 +7262,25 @@ if (applyAllSheetsBtn) {
 }
 
 window.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && String(event.key || "").toLowerCase() === "s") {
+    event.preventDefault();
+    saveProjectFile().catch((error) => {
+      console.error(error);
+      alert(String(error?.message || "Falha ao salvar projeto."));
+    });
+    return;
+  }
+
   if (event.key === "Escape" && sheetEditModalEl && !sheetEditModalEl.classList.contains("hidden")) {
     closeSheetEditorModal();
+    return;
+  }
+  if (event.key === "Escape" && cutEditModalEl && !cutEditModalEl.classList.contains("hidden")) {
+    closeCutEditorModal();
+    return;
+  }
+  if (event.key === "Escape" && simCutModalEl && !simCutModalEl.classList.contains("hidden")) {
+    stopCutSimulation();
   }
 });
 
@@ -5392,9 +7289,11 @@ updateCacheStatsBadge(null);
 updateSelectedPieceBadge(null);
 setInventoryBusyState(false);
 updateInventoryListUi();
+initializeCutEditorState();
 ensureInitialSheet();
 updateSheetListUi();
 updateSheetInfoBadge();
+updateProjectInfoBadge();
 updateGlobalBounds();
 fitToScene(1.18);
 
@@ -5558,6 +7457,13 @@ function buildGroupFromStepPayload(payload, filename = "arquivo.step") {
   const meshObj = new THREE.Mesh(geometry, material);
   const group = new THREE.Group();
   group.name = String(filename || "arquivo.step");
+  applyGroupCutMetadata(group, {
+    sourceType: "step",
+    partCode: extractPartCodeFromName(filename),
+    fileName: filename,
+    width: Number(payload?.bounds?.size?.x || 0),
+    height: Number(payload?.bounds?.size?.y || 0)
+  });
   group.add(meshObj);
   return group;
 }
@@ -5847,6 +7753,14 @@ async function createSceneGroupFromInventoryItem(item, onIssue = null) {
   const group = item.templateGroup?.clone(true) || null;
   if (!group) return null;
   group.name = String(item.fileName || `${item.code || "peca"}.dxf`);
+  applyGroupCutMetadata(group, {
+    sourceType: String(item.sourceType || "").toLowerCase() === PART_KIND_DXF ? PART_KIND_DXF : "step",
+    partCode: item.code || extractPartCodeFromName(item.fileName || ""),
+    fileName: item.fileName || group.name,
+    width: Number(item.width || 0),
+    height: Number(item.height || 0),
+    cutContours: item.preParsed?.contours || null
+  });
   if (String(item.sourceType || "").toLowerCase() === PART_KIND_DXF) {
     markPartAsDxf(group, Number(item.sourceThickness || DEFAULT_PART_THICKNESS));
   }
@@ -6324,6 +8238,7 @@ fitBtn.addEventListener("click", () => {
 
 clearBtn.addEventListener("click", () => {
   clearSelection();
+  stopCutSimulation({ keepModal: false });
   while (partsGroup.children.length) {
     const child = partsGroup.children[0];
     partsGroup.remove(child);
@@ -6343,6 +8258,7 @@ clearBtn.addEventListener("click", () => {
 });
 
 window.addEventListener("beforeunload", () => {
+  stopCutSimulation({ keepModal: true });
   disposeAllInventoryTemplateGroups();
   disposeInactiveProxyInstancedMesh();
   if (dxfWorkerPool && typeof dxfWorkerPool.terminate === "function") {
@@ -6377,6 +8293,7 @@ function animate() {
     });
   }
   const transitionActive = updateSheetRingTransition(now);
+  updateCutSimulation(now);
   syncInactiveProxyInstancing({ transitionActive });
   controls.update();
   renderer.render(scene, camera);

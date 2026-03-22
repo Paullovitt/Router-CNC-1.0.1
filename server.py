@@ -7,11 +7,13 @@ import io
 import json
 import math
 import os
+import re
 import struct
 import tempfile
 import threading
 import time
 from collections import OrderedDict
+from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -611,6 +613,47 @@ def parse_step_text_to_stl_base64(text: str, filename: str = "arquivo.step") -> 
                 pass
 
 
+def default_timestamp_base_name() -> str:
+    now = datetime.now()
+    return f"{now.day:02d}{now.month:02d}-{now.hour:02d}{now.minute:02d}"
+
+
+def normalize_generic_filename(raw: Any, fallback: str = "arquivo") -> str:
+    name = str(raw or "").strip()
+    if not name:
+        name = str(fallback or "").strip()
+    if not name:
+        name = "arquivo"
+    clean = re.sub(r'[\\/:*?"<>|]+', "_", name).strip()
+    return clean or "arquivo"
+
+
+def normalize_project_filename(raw: Any) -> str:
+    clean = normalize_generic_filename(raw, f"{default_timestamp_base_name()}-.CNC3D")
+    if not clean.lower().endswith(".cnc3d"):
+        clean += ".CNC3D"
+    return clean
+
+
+def normalize_text_filename(raw: Any, default_ext: str = ".txt") -> str:
+    ext = str(default_ext or ".txt").strip()
+    if not ext.startswith("."):
+        ext = "." + ext
+    ext_lower = ext.lower()
+    clean = normalize_generic_filename(raw, f"arquivo{ext_lower}")
+    if not clean.lower().endswith(ext_lower):
+        clean += ext.upper() if ext_lower == ".nc" else ext_lower
+    return clean
+
+
+def atomic_write_bytes(path: Path, data: bytes, prefix: str = ".router_") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(prefix=prefix, suffix=".tmp", dir=str(path.parent), delete=False) as tmp:
+        tmp.write(data)
+        tmp_path = Path(tmp.name)
+    tmp_path.replace(path)
+
+
 class ViewerHandler(SimpleHTTPRequestHandler):
     def end_headers(self) -> None:  # noqa: D401
         # Evita cache agressivo no navegador para garantir que o frontend carregue
@@ -646,7 +689,7 @@ class ViewerHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
-        if path not in ("/api/parse-dxf", "/api/parse-step"):
+        if path not in ("/api/parse-dxf", "/api/parse-step", "/api/save-project", "/api/save-text"):
             self.send_error(404, "Endpoint nao encontrado.")
             return
 
@@ -656,6 +699,57 @@ class ViewerHandler(SimpleHTTPRequestHandler):
             payload = json.loads(body.decode("utf-8", "replace"))
         except Exception:
             self._send_json({"ok": False, "error": "JSON invalido."}, status=400)
+            return
+
+        save_dir = Path(getattr(self.server, "save_dir", Path.cwd())).resolve()
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        if path == "/api/save-project":
+            try:
+                filename = normalize_project_filename(payload.get("filename"))
+                project_payload = payload.get("payload")
+                if not isinstance(project_payload, dict):
+                    project_payload = {}
+                target = save_dir / filename
+                existed = target.exists()
+                encoded = (json.dumps(project_payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+                atomic_write_bytes(target, encoded, prefix=".cnc3d_")
+                stat = target.stat()
+                self._send_json(
+                    {
+                        "ok": True,
+                        "filename": filename,
+                        "path": str(target),
+                        "updated": bool(existed),
+                        "bytes": int(stat.st_size),
+                        "mtime_iso": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                    }
+                )
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)})
+            return
+
+        if path == "/api/save-text":
+            try:
+                default_ext = str(payload.get("default_ext") or ".txt")
+                filename = normalize_text_filename(payload.get("filename"), default_ext)
+                content = str(payload.get("content") or "")
+                target = save_dir / filename
+                existed = target.exists()
+                atomic_write_bytes(target, content.encode("utf-8"), prefix=".cnc_text_")
+                stat = target.stat()
+                self._send_json(
+                    {
+                        "ok": True,
+                        "filename": filename,
+                        "path": str(target),
+                        "updated": bool(existed),
+                        "bytes": int(stat.st_size),
+                        "mtime_iso": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                    }
+                )
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)})
             return
 
         text = payload.get("text")
@@ -716,9 +810,12 @@ def main() -> None:
     root = Path(args.dir).resolve()
     handler = make_handler(root)
     server = ThreadingHTTPServer((args.host, args.port), handler)
+    server.save_dir = (root / "runtime").resolve()
+    server.save_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Servidor ativo em http://{args.host}:{args.port}")
     print(f"Diretorio servido: {root}")
+    print(f"Diretorio de salvamento local: {server.save_dir}")
     print("API DXF Python: POST /api/parse-dxf")
     if CUDA_AVAILABLE:
         print(f"DXF CUDA: disponivel ({CUDA_PATH_DETECTED or 'CUDA_PATH'})")
@@ -728,6 +825,8 @@ def main() -> None:
         print("API STEP Python: indisponivel (cadquery nao instalado)")
     else:
         print("API STEP Python: POST /api/parse-step")
+    print("API salvar projeto: POST /api/save-project")
+    print("API salvar texto: POST /api/save-text")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

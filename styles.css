@@ -447,6 +447,84 @@ select {
   margin-top: 12px;
 }
 
+.cut-modal-card {
+  width: min(980px, calc(100vw - 24px));
+  max-height: calc(100vh - 28px);
+  overflow: auto;
+}
+
+.cut-modal-title {
+  cursor: move;
+  user-select: none;
+  margin-bottom: 8px;
+}
+
+.cut-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px 10px;
+}
+
+.cut-grid .field > input,
+.cut-grid .field > select {
+  width: 100%;
+  min-width: 0;
+}
+
+.cut-tool-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.sim-modal {
+  position: fixed;
+  left: 50%;
+  top: 84px;
+  transform: translateX(-50%);
+  z-index: 72;
+}
+
+.sim-modal.hidden {
+  display: none;
+}
+
+.sim-card {
+  min-width: 560px;
+  max-width: calc(100vw - 24px);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #121c2a 0%, #101a28 100%);
+  box-shadow: 0 14px 30px rgba(2, 6, 23, 0.42);
+  padding: 10px 12px;
+}
+
+.sim-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+  cursor: move;
+  user-select: none;
+}
+
+.sim-title {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.sim-info {
+  font-size: 15px;
+  color: #c4d4e6;
+}
+
+.sim-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 @media (max-width: 1220px) {
   #workspace {
     grid-template-columns: 1fr;
@@ -491,5 +569,13 @@ select {
 
   .inventory-grid-content {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .cut-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .sim-card {
+    min-width: min(560px, calc(100vw - 24px));
   }
 }
